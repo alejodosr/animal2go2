@@ -14,9 +14,10 @@ correspond joint-by-joint):
   4. Analytic IK per leg (retarget/ik.py), clamped to joint limits with the
      clamp rate reported.
 
-No post-processing yet (phase 4): expect foot-skate, jitter, and some ground
-penetration. Foot contacts are detected on the *source* toes (height +
-horizontal-speed thresholds) and stored for phase 4 / the RL milestone.
+Foot contacts are detected on the *source* toes (height + horizontal-speed
+thresholds); post-processing (retarget/postprocess.py: contact refinement,
+smoothing, ground alignment, foot-skate removal) then runs by default —
+pass --raw to see the phase-3 output with its skate and jitter.
 
 Usage:
     python retarget/retarget.py data/processed/D1_007_KAN01_001.npz
@@ -42,6 +43,7 @@ if sys.path and sys.path[0] == str(REPO_ROOT / "retarget"):
 else:
     sys.path.insert(0, str(REPO_ROOT))
 from retarget import ik
+from retarget.postprocess import postprocess
 from retarget.skeleton import extract_keypoints, parse_bvh
 MOTIONS_DIR = REPO_ROOT / "motions"
 
@@ -107,7 +109,10 @@ def retarget_clip(kp, scale=None):
     origin, trunk_rot = fit_trunk_frame(kp)
 
     if scale is None:
-        scale = GO2_STANDING_HEIGHT / kp["leg_root_pos"][..., 2].mean()
+        # Median, not mean: clips with crouch/lying segments (e.g. D1_009)
+        # drag the mean leg-root height down and inflate the scale until the
+        # Go2 legs can't reach the pinned stance feet.
+        scale = GO2_STANDING_HEIGHT / np.median(kp["leg_root_pos"][..., 2])
 
     # Root: scaled trunk frame, xy shifted so the clip starts at the origin.
     root_pos = origin * scale
@@ -133,7 +138,8 @@ def retarget_clip(kp, scale=None):
         "dof_pos": dof_pos,
         "foot_contacts": detect_contacts(kp),
         "source": kp["source"],
-    }, {"scale": scale, "clamp_rate": violated.mean(), "violated": violated}
+    }, {"scale": scale, "clamp_rate": violated.mean(), "violated": violated,
+        "foot_targets": foot_targets}
 
 
 def resample(motion, target_fps=50.0):
@@ -177,12 +183,18 @@ def main():
     parser.add_argument("--fps", type=float, default=50.0, help="output fps")
     parser.add_argument("--scale", type=float, default=None,
                         help="override the automatic dog->Go2 scale factor")
+    parser.add_argument("--raw", action="store_true",
+                        help="skip post-processing (phase-3 output: skate + jitter)")
     args = parser.parse_args()
 
     MOTIONS_DIR.mkdir(exist_ok=True)
     for path in args.clips:
         kp = load_keypoints(path)
         motion, info = retarget_clip(kp, scale=args.scale)
+        if not args.raw:
+            motion, report = postprocess(motion, info["foot_targets"])
+            info["clamp_rate"] = report["clamp_rate"]
+            info["violated"] = report["violated"]
         motion = resample(motion, args.fps)
         out = MOTIONS_DIR / f"{motion['source']}.pkl"
         with open(out, "wb") as f:
@@ -192,6 +204,10 @@ def main():
               f"@ {motion['fps']:.0f} fps, scale {info['scale']:.3f}, "
               f"clamp rate {100 * info['clamp_rate']:.2f}%, "
               f"stance fraction {stance:.2f}")
+        if not args.raw:
+            print(f"  post-process: stance-foot skate "
+                  f"{report['skate_before']:.3f} -> {report['skate_after']:.3f} m/s, "
+                  f"ground offset {1000 * report['ground_offset']:+.0f} mm")
         if info["clamp_rate"] > 0.03:
             per_joint = info["violated"].mean(axis=0)
             worst = np.argsort(per_joint)[::-1][:3]
