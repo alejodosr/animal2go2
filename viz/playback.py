@@ -69,15 +69,14 @@ def render_video(model, data, motion, out_path, width=1920, height=1080):
     qpos = qpos_trajectory(model, motion)
     renderer = mujoco.Renderer(model, height=height, width=width)
     cam = tracking_camera(model)
-    frames = []
-    for q in qpos:
-        data.qpos[:] = q
-        mujoco.mj_forward(model, data)
-        renderer.update_scene(data, cam)
-        frames.append(renderer.render())
+    with imageio.get_writer(out_path, fps=motion["fps"]) as writer:
+        for q in qpos:
+            data.qpos[:] = q
+            mujoco.mj_forward(model, data)
+            renderer.update_scene(data, cam)
+            writer.append_data(renderer.render())
     renderer.close()
-    imageio.mimsave(out_path, frames, fps=motion["fps"])
-    print(f"wrote {out_path} ({len(frames)} frames @ {motion['fps']:.0f} fps)")
+    print(f"wrote {out_path} ({len(qpos)} frames @ {motion['fps']:.0f} fps)")
 
 
 def run_interactive(model, data, motion):

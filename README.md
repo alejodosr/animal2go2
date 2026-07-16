@@ -1,7 +1,19 @@
 # animal2go2
 
 Dog mocap → Unitree Go2 kinematic retargeting (Milestone 1). See `brief_claude.md`
-for the full plan. Status: **Phases 0–3 done (environment, data, leg IK, retarget v0).**
+for the full plan. Status: **all phases (0–5) done.**
+
+## Reproduce everything (3 commands)
+
+```bash
+uv sync
+curl -L -o data/MotionCapture.zip https://starke-consult.de/AI4Animation/SIGGRAPH_2018/MotionCapture.zip && unzip -o data/MotionCapture.zip -d data/
+MUJOCO_GL=egl uv run python export_all.py
+```
+
+The last command retargets every clip in `data/` to `motions/<clip>.pkl`
+(brief §7 format) and renders `media/go2_<clip>.mp4` for each, then prints a
+summary table (scale, clamp rate, foot-skate before/after) over the dataset.
 
 ## Setup
 
@@ -81,9 +93,42 @@ brief §3: rigid trunk frame fitted to the dog's hip+shoulder segment (x from
 pelvis→chest, y from left−right leg roots), uniform scale = 0.27 / mean dog
 leg-root height, toes re-anchored from the dog's mean leg mounts to the Go2
 leg-plane origins, analytic IK, resample to 50 Hz. Output pkls follow §7
-(root_rot **xyzw**; playback converts to MuJoCo wxyz). No post-processing
-yet: foot-skate, jitter, and some ground penetration are expected until
-phase 4. Clamp rates: walk 0.0%, trot 0.8%, canter 1.3%.
+(root_rot **xyzw**; playback converts to MuJoCo wxyz). Pass `--raw` to
+`retarget.py` to see this v0 output — foot-skate, jitter, and some ground
+penetration, all removed in phase 4. Clamp rates: walk 0.0%, trot 0.8%,
+canter 1.3%.
+
+## Phase 4 — post-processing
+
+Runs by default inside `retarget/retarget.py` (`--raw` disables it).
+`retarget/postprocess.py`, in order — order matters:
+
+1. **Contact refinement**: stance/swing runs shorter than ~50 ms are detector
+   flicker, merged away.
+2. **Smoothing**: ~7 Hz Butterworth on foot targets and root trajectory
+   *before* IK — smoothing joint angles after IK would drag stance feet and
+   reintroduce skate; smoothing the targets cannot.
+3. **Ground alignment**: global z-shift so the median stance-foot center sits
+   at the foot-sphere radius (sphere touches z = 0).
+4. **Foot-skate removal**: each stance segment's foot target is pinned to its
+   touch-down xy at ground height, blended in/out over a few frames.
+5. **IK + limit report**: solve, clamp to MJCF limits, log the clamp rate
+   (>3% triggers a warning — fix scaling upstream, don't clamp harder).
+
+Stance-foot skate drops to ~0 m/s (from ~0.2 m/s raw); per-clip numbers are
+in the batch summary table.
+
+## Phase 5 — batch export
+
+```bash
+MUJOCO_GL=egl uv run python export_all.py                    # all clips
+MUJOCO_GL=egl uv run python export_all.py data/D1_007*.bvh   # a subset
+uv run python export_all.py --no-video                       # pkls only, no GPU
+```
+
+One `motions/<clip>.pkl` + `media/go2_<clip>.mp4` per source clip, plus the
+summary table. `--skip-existing` resumes an interrupted run. Failures don't
+abort the batch; they're listed at the end (nonzero exit).
 
 ### Notes / things that broke (article fodder)
 
