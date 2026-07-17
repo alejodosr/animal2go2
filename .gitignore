@@ -5,3 +5,12 @@ data/
 media/
 motions/*
 !motions/.gitkeep
+logs
+.venv/lib64
+.venv/bin/python3
+.venv/bin/python
+.venv/bin/python3.13
+data
+media
+outputs
+motions_quarantine
