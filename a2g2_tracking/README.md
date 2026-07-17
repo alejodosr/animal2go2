@@ -5,9 +5,33 @@ DeepMimic-style tracking of the Milestone 1 retargeted dog motions
 Generated from the Isaac Lab external-project template (Direct workflow);
 template docs kept below.
 
-**Stack (pinned):** Isaac Lab 2.3.x @ `~/py_workspace/IsaacLab`, Isaac Sim
-5.1.0 (pip venv `$A2G2_SSD/venvs/env_isaaclab`), torch 2.7.0+cu128,
-driver 535.183.01, RTX 3090.
+**Stack (pinned):** Isaac Lab **v2.3.1** (`5c2ec81cb1`) @
+`~/py_workspace/IsaacLab`, Isaac Sim 5.1.0 (pip venv
+`$A2G2_SSD/venvs/env_isaaclab`), torch 2.7.0+cu128, driver 535.183.01,
+RTX 3090.
+
+## Status
+
+- **Phase 0** — install & smoke test: done (Go2 velocity task trains).
+- **Phase 1** — motion library: done. `motion/motion_loader.py` (all
+  convention fixes: xyzw→wxyz, canonical→sim dof order by name, z-offset,
+  log-map angular velocities) + `motion/motion_lib.py` (multi-clip RSI
+  sampling, slerp lookup). 13 unit tests.
+- **Phase 2** — tracking env: done, all gates passed (2026-07-17).
+  - Kinematic replay gate (`play.py --replay`): walk / trot / canter replay
+    cleanly; stance foot centers match the empirical rest height to 0.1 mm;
+    videos in `media/replay_D1_009_KAN01_002/` (trot), `media/replay_D1_007_KAN01_001/` (walk).
+  - Throughput: **83,653 env-steps/s** aggregate at 4096 envs headless
+    (acceptance bar 50k).
+  - 0 non-finite rewards/obs over 300 random-action steps.
+  - Env: DirectRLEnv with RSI (+noise), early termination (root pos/ori,
+    joint err, base contact), clip-end truncation, 8-term DeepMimic reward
+    (per-term + termination-cause logging), asymmetric actor-critic, §4
+    randomization (friction/mass/pushes) already on. Clips: walk
+    `D1_007_KAN01_001`, trot `D1_009_KAN01_002`, canter `D1_010_KAN01_004`
+    (all cyclic).
+- **Phase 3** — training: next. Curriculum starts single-clip trot (restrict
+  sampling to trot before the first run).
 
 ## Load-bearing constants
 
@@ -42,6 +66,22 @@ python a2g2_tracking/scripts/rsl_rl/play.py --task Template-A2g2-Tracking-Direct
 python a2g2_tracking/scripts/rsl_rl/train.py --task Template-A2g2-Tracking-Direct-v0 --headless
 python a2g2_tracking/scripts/rsl_rl/play.py  --task Template-A2g2-Tracking-Direct-v0 --num_envs 32
 ```
+
+## Traps hit in Phase 2 (article fodder)
+
+- **Ground alignment is about the *effective* contact surface, not collider
+  geometry.** See `GROUND_Z_OFFSET` above: calibrating against the 0.022 m
+  sphere radius put the robot 2 mm *into* contact and depenetration lifted it.
+  The ground truth is a PD-held drop test (`FOOT_REST_CENTER_Z = 0.0239`);
+  the replay gate prints the residual against it.
+- **Go2 USD colliders are invisible to `stage.Traverse()`** — geometry lives
+  inside instanceable references; traverse with
+  `Usd.PrimRange(prim, Usd.TraverseInstanceProxies())`.
+- **`simulation_app.close()` can hard-exit before Python flushes stdout** —
+  result lines from AppLauncher scripts must use `print(..., flush=True)` or
+  they silently vanish (worse when piped: block buffering).
+- Gym id stays the template-generated `Template-A2g2-Tracking-Direct-v0`
+  (brief §2: follow the template, don't fight it).
 
 ---
 

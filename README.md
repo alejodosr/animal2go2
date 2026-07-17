@@ -3,6 +3,11 @@
 Dog mocap → Unitree Go2 kinematic retargeting (Milestone 1). See `brief_claude.md`
 for the full plan. Status: **all phases (0–5) done.**
 
+**Milestone 2** (RL tracking policy in Isaac Lab, `brief_claude_milestone2.md`)
+lives in [`a2g2_tracking/`](a2g2_tracking/README.md) — status, measured
+constants, and the train/replay workflow are documented there. Currently:
+Phase 2 (tracking env + replay gate) done, Phase 3 (training) next.
+
 ## Reproduce everything (3 commands)
 
 ```bash
