@@ -183,6 +183,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    env_cfg.enable_ghost = args_cli.ghost
+    if args_cli.video:
+        # follow camera on the robot root (not settable via hydra: asset_name
+        # defaults to None and cfg overrides are type-checked against that)
+        env_cfg.viewer.origin_type = "asset_root"
+        env_cfg.viewer.asset_name = "robot"
+        env_cfg.viewer.eye = (1.8, 1.8, 0.9)
+        env_cfg.viewer.lookat = (0.0, 0.0, 0.3)
 
     # kinematic replay gate (Phase 2): no checkpoint involved
     if args_cli.replay:

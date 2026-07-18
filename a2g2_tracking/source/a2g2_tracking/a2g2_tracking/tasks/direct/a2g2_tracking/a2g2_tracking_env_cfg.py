@@ -135,6 +135,9 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     rsi_root_z_noise = 0.02  # m, uniform [0, +z]
 
     # early termination bounds (loose — they truncate hopeless rollouts)
+    # keep tight: this bound is itself the anti-drift learning signal — the
+    # exp position kernel has no gradient beyond ~0.6 m, and relaxing to 2.0 m
+    # quadrupled deterministic drift (RESULTS.md, stage1c)
     term_root_pos_err = 0.5  # m
     term_root_ori_err = 0.785  # rad (45°)
     term_joint_err = 1.0  # rad, mean over 12 dofs
@@ -146,10 +149,14 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     rew_joint_vel_k = 0.1
     rew_root_ori_w = 0.15
     rew_root_ori_k = 10.0
-    rew_root_vel_w = 0.15
+    # doubled from 0.15 after stage1c: drift is integrated velocity error, and
+    # velocity (unlike position) is actor-observable via stance-leg dof_vel
+    rew_root_vel_w = 0.30
     rew_root_vel_k = 2.0
-    rew_root_height_w = 0.05
-    rew_root_height_k = 100.0
+    # full 3D root position (DeepMimic com term) — replaces the height-only
+    # term after run 1: xy drift ended 100% of eval episodes (RESULTS.md)
+    rew_root_pos_w = 0.1
+    rew_root_pos_k = 10.0
     rew_contact_match_w = 0.1
     rew_action_rate_w = -0.01
     rew_torque_w = -1.0e-4
@@ -161,3 +168,7 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     kinematic_replay = False  # force-set reference states every step (Phase 2 gate)
     replay_clip: str | None = None  # clip name for replay; None → env_idx % num_clips
     enable_ghost = False  # transparent reference ghost robot (replay/videos)
+    # ghost renders side-by-side, not overlaid: the Go2 USD is instanceable, so
+    # collision_enabled=False fails on its instance proxies and an overlapped
+    # ghost physically ejects the robot at every RSI reset
+    ghost_y_offset = 1.0  # m, world +y

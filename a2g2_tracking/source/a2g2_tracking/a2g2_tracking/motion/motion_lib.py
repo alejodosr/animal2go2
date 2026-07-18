@@ -51,6 +51,19 @@ class MotionLib:
             flat = torch.cat([getattr(c, field) for c in clips], dim=0).to(self.device)
             setattr(self, field, flat)
 
+        # per-loop xy root displacement for cyclic clips: without it the
+        # reference teleports back to the loop start at every wrap, which
+        # instantly exceeds any position-termination bound (RESULTS.md,
+        # stage1a–d all died at the first wrap). Scaled by N/(N-1) so the
+        # wrap segment (frame N-1 → frame 0 of the next loop) advances by the
+        # clip's average per-frame step. z stays periodic (in-place gaits).
+        first = self.offsets
+        last = self.offsets + self.num_frames - 1
+        loop_dp = self.root_pos[last] - self.root_pos[first]
+        loop_dp[:, 2] = 0.0
+        loop_dp *= (lengths / (lengths - 1).clamp(min=1)).to(loop_dp.dtype).unsqueeze(-1)
+        self.loop_dp = torch.where(self.cyclic.unsqueeze(-1), loop_dp, torch.zeros_like(loop_dp))
+
     @classmethod
     def from_files(
         cls,
@@ -81,19 +94,26 @@ class MotionLib:
     # -- lookup --------------------------------------------------------------
 
     def _frame_indices(self, clip_idx: torch.Tensor, t: torch.Tensor):
-        """(global_idx0, global_idx1, blend) for interpolated lookup."""
+        """(global_idx0, global_idx1, blend, loops, wrap_seg) for lookup.
+
+        ``loops`` counts completed cycles of cyclic clips (0 for acyclic);
+        ``wrap_seg`` marks lookups inside the frame N-1 → frame 0 seam, whose
+        second endpoint belongs to the NEXT loop.
+        """
         cyclic = self.cyclic[clip_idx]
         n = self.num_frames[clip_idx]
         dur = self.durations[clip_idx]
+        loops = torch.where(cyclic, (t / dur).floor().clamp(min=0), torch.zeros_like(t))
         t = torch.where(cyclic, t % dur, t.clamp(min=torch.zeros_like(dur), max=dur))
         f = t * self.fps
         i0 = f.floor().long()
         blend = (f - i0).unsqueeze(-1)
         i1 = i0 + 1
         i0 = torch.where(cyclic, i0 % n, i0.clamp(max=n - 1))
+        wrap_seg = cyclic & (i1 >= n)
         i1 = torch.where(cyclic, i1 % n, i1.clamp(max=n - 1))
         off = self.offsets[clip_idx]
-        return off + i0, off + i1, blend
+        return off + i0, off + i1, blend, loops, wrap_seg
 
     def get_frame(self, clip_idx: torch.Tensor, t: torch.Tensor) -> dict[str, torch.Tensor]:
         """Reference state at continuous time ``t`` (E,) into clips (E,).
@@ -101,7 +121,7 @@ class MotionLib:
         Linear interpolation between frames, slerp for the root quaternion,
         nearest frame for contacts.
         """
-        g0, g1, blend = self._frame_indices(clip_idx, t)
+        g0, g1, blend = self._frame_indices(clip_idx, t)[:3]
         out: dict[str, torch.Tensor] = {}
         for field in self.FIELDS:
             flat = getattr(self, field)
@@ -111,7 +131,16 @@ class MotionLib:
                 out[field] = torch.where(blend < 0.5, flat[g0], flat[g1])
             else:
                 out[field] = torch.lerp(flat[g0], flat[g1], blend)
+        out["root_pos"] = self._unwrapped_root_pos(clip_idx, t)
         return out
+
+    def _unwrapped_root_pos(self, clip_idx: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Root position with loop displacement accumulated across wraps."""
+        g0, g1, blend, loops, wrap_seg = self._frame_indices(clip_idx, t)
+        dp = self.loop_dp[clip_idx]
+        p1 = self.root_pos[g1] + torch.where(wrap_seg.unsqueeze(-1), dp, torch.zeros_like(dp))
+        pos = torch.lerp(self.root_pos[g0], p1, blend)
+        return pos + loops.unsqueeze(-1) * dp
 
     def phase(self, clip_idx: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Normalized clip phase ∈ [0, 1) (E,) — sin/cos-encoded by the env."""

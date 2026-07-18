@@ -402,6 +402,36 @@ finite on random actions.
 
 ## §4 Phase 3 — Training (rsl_rl PPO)
 
+**STATUS (2026-07-18): stage 1 (single-clip trot) in progress — 4 runs done,
+acceptance not yet met. Full run table + analysis in `RESULTS.md` (repo
+root); per-run eval tables in `logs/rsl_rl/a2g2_tracking_go2/<run>/
+eval_results.md`. Read RESULTS.md before launching anything.**
+
+- Best policy so far: `2026-07-17_19-17-15_stage1d_trot_velx2` (joint err
+  0.277 rad vs 0.15 target; gait qualitatively good in videos).
+- **Critical bug found & fixed (untrained-on)**: cyclic reference root_pos
+  teleported to loop start at every wrap (`MotionLib`), killing 100% of
+  episodes at the first wrap via `root_pos` termination — all stage-1
+  episode-length/survival numbers are artifacts of it. Fixed + regression
+  test; **no run has trained on the fix yet**. Next run = stage1d config +
+  wrap fix, nothing else changed.
+- Tooling since the brief was written: `eval.py` (deterministic per-clip
+  metrics), `play.py` follow camera + side-by-side ghost (`ghost_y_offset`
+  — overlaid ghost physically ejects the robot: instanceable USD ignores
+  collision/material overrides).
+- **Open issues for the implementation review vs. Peng 2020**:
+  1. Action parameterization: targets = `default_pose + 0.25·a` needs
+     |a| ≈ 5 to reach the trot's extremes (max |q_ref − default| = 1.28 rad,
+     mean 0.42) — the paper parameterizes around the *reference* pose.
+     Torques are fine (RMS ≈ 3.7 N·m vs 23.7 limit), positions are strained.
+  2. Reference dof_vel peaks at 38 rad/s > Go2's ~30 rad/s limit (peaks
+     only; M1 clamp-rate logs relevant).
+  3. No action-saturation logging yet (fraction of steps at soft joint
+     limits, |a| distribution) — add before tuning further.
+- Speedups available: CPU governor is `powersave` (Kit warns at launch;
+  `sudo cpupower frequency-set -g performance`, 20 cores), and 4096 → 8192
+  envs is untested on the 3090 (collection dominates iteration time).
+
 Start config: 4096 envs (3090/24 GB handles this on flat terrain), 24-step
 rollouts, PPO defaults from the Go2 velocity task as the base, entropy coef
 0.005–0.01, lr 1e-3 adaptive.

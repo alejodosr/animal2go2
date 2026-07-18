@@ -84,7 +84,7 @@ class A2g2TrackingEnv(DirectRLEnv):
                 "joint_vel_tracking",
                 "root_ori_tracking",
                 "root_vel_tracking",
-                "root_height_tracking",
+                "root_pos_tracking",
                 "contact_match",
                 "action_rate",
                 "torque",
@@ -141,7 +141,9 @@ class A2g2TrackingEnv(DirectRLEnv):
             limits = self._robot.data.soft_joint_pos_limits
             self._processed_actions = targets_sim.clamp(limits[..., 0], limits[..., 1])
         if self._ghost is not None:
-            self._write_ref_state(self._ghost, self._ref_frame(), self._robot._ALL_INDICES)
+            self._write_ref_state(
+                self._ghost, self._ref_frame(), self._robot._ALL_INDICES, y_offset=self.cfg.ghost_y_offset
+            )
 
     def _apply_action(self):
         if self.cfg.kinematic_replay:
@@ -150,10 +152,16 @@ class A2g2TrackingEnv(DirectRLEnv):
         else:
             self._robot.set_joint_position_target(self._processed_actions)
 
-    def _write_ref_state(self, robot: Articulation, ref: dict[str, torch.Tensor], env_ids: torch.Tensor):
+    def _write_ref_state(
+        self, robot: Articulation, ref: dict[str, torch.Tensor], env_ids: torch.Tensor, y_offset: float = 0.0
+    ):
+        root_pos = self._ref_root_pos_w(ref)[env_ids]
+        if y_offset != 0.0:
+            root_pos = root_pos.clone()
+            root_pos[:, 1] += y_offset
         root_state = torch.cat(
             [
-                self._ref_root_pos_w(ref)[env_ids],
+                root_pos,
                 ref["root_rot"][env_ids],
                 ref["root_lin_vel"][env_ids],
                 ref["root_ang_vel"][env_ids],
@@ -222,7 +230,7 @@ class A2g2TrackingEnv(DirectRLEnv):
         vel_err = (data.root_lin_vel_w - ref["root_lin_vel"]).square().sum(dim=-1) + (
             data.root_ang_vel_w - ref["root_ang_vel"]
         ).square().sum(dim=-1)
-        height_err = (data.root_pos_w[:, 2] - self._ref_root_pos_w(ref)[:, 2]).square()
+        root_pos_err = (data.root_pos_w - self._ref_root_pos_w(ref)).square().sum(dim=-1)
         contact_match = (self._foot_contacts() == ref["foot_contacts"]).float().mean(dim=-1)
         action_rate = (self._actions - self._previous_actions).square().sum(dim=-1)
         torque = data.applied_torque.square().sum(dim=-1)
@@ -232,7 +240,7 @@ class A2g2TrackingEnv(DirectRLEnv):
             "joint_vel_tracking": cfg.rew_joint_vel_w * torch.exp(-cfg.rew_joint_vel_k * joint_vel_err),
             "root_ori_tracking": cfg.rew_root_ori_w * torch.exp(-cfg.rew_root_ori_k * ori_err.square()),
             "root_vel_tracking": cfg.rew_root_vel_w * torch.exp(-cfg.rew_root_vel_k * vel_err),
-            "root_height_tracking": cfg.rew_root_height_w * torch.exp(-cfg.rew_root_height_k * height_err),
+            "root_pos_tracking": cfg.rew_root_pos_w * torch.exp(-cfg.rew_root_pos_k * root_pos_err),
             "contact_match": cfg.rew_contact_match_w * contact_match,
             "action_rate": cfg.rew_action_rate_w * action_rate,
             "torque": cfg.rew_torque_w * torque,
