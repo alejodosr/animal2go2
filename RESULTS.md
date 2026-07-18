@@ -1,9 +1,11 @@
 # Milestone 2 — Phase 3 training runs
 
-**STATUS (2026-07-18 night): STAGE 1 (single-clip trot) ACCEPTANCE MET —
-stage4: joint err 0.0905 (bar 0.15), survival 98.2% (= reached clip end;
-clips are acyclic since root cause #2). Curriculum next: stage5 phase-free
-tracker (queued), then walk + multi-clip, canter last.**
+**STATUS (2026-07-18 late night): CURRICULUM STAGE 2 (walk+trot, one
+policy) ACCEPTANCE MET — stage6 per-clip: walk 0.029 rad / 95.4%
+survival, trot 0.109 rad / 99.4% survival (phase-free contract). Trot
+tracking degraded vs its single-clip best (0.080 → 0.109, multi-task
+interference) but well within the 0.15 bar. Next: canter (stage7), then
+Phase 4/5 (eval assets, robustness, export).**
 
 One row per run; one change per run (brief §4). Eval numbers from `eval.py`
 (512 envs, deterministic, randomization off) on the run's final checkpoint.
@@ -19,6 +21,7 @@ One row per run; one change per run (brief §4). Eval numbers from `eval.py`
 | `2026-07-18_16-03-12_stage3_heading_trot` | + heading-error obs (sin/cos ref-relative yaw; contract 80→82) | 3000 | ~98 | 210/500 | 0.0737 | 30.0% | ✗ **no change vs stage2** (len 150 vs 154, 512/512 `root_ori`) — and the yaw/tilt decomposition (added to eval.py) shows why: **yaw was never the problem** (end-of-episode yaw err 4.5°); end-of-episode TILT is 17° and accelerating ⇒ deaths are acute trip/fall events, not slow heading drift. The 45° ori bound is acting as a fall detector |
 | `2026-07-18_17-45-50_stage4_acyclic_trot` | clips acyclic (episode = clip, end = truncation; root cause #2 fix) + injective acyclic phase encoding | 2000 (stopped: plateau from ~1300) | ~92 | 210 (cap ≈228) | 0.0905 | **survival 98.2%** (504/513 reach clip end; 9 `root_pos` deaths, all in the fast-trot final phase) | ✓✓ **STAGE-1 ACCEPTANCE MET**: joint err 0.09 < 0.15 AND survival ≫ 90%. `root_ori` deaths: 512→0. Video (one full episode, frame 0 → truncation): `videos/play/rl-video-step-0.mp4` |
 | `2026-07-18_19-36-23_stage5_phasefree_trot` | phase-free tracker: phase obs removed, preview extended to steps [1,2,15,50] (20 ms–1 s, Peng-style); contract 82→116 actor / 124 critic | 2000 (stopped: plateau from ~1400) | ~93 | 212 | **0.0802** | survival 92.6% (474/512; 38 `root_pos` deaths, phase 0.8–1.0) | ✓ **parity: acceptance still met** (0.08 < 0.15, 92.6% > 90%) with *better* tracking; survival −5.6 pts vs stage4 — drift deaths in the fast section 9→38 (xy err 0.113→0.131). The phase-free contract is validated; the fast-section drift leak is the open item |
+| `2026-07-18_20-36-50_stage6_multiclip_walktrot` | + walk clip (2-clip RSI, one policy, no clip ID — preview-only conditioning) | 3000 (still improving at 2200, ran full) | ~140* | ~230 | walk **0.0286** / trot 0.1085 | walk **95.4%** / trot **99.4%** | ✓✓ **STAGE-2 ACCEPTANCE MET** — both clips pass both bars from one policy. Interference trade: trot tracking −35% vs single-clip best (0.080→0.109) yet trot survival UP (92.6→99.4%; walk co-training regularizes). Walk deaths: 22 root_pos in its fast lead-out (phase 0.8–1.0). Per-clip videos in `videos/play/` (*2-clip reward, not comparable) |
 
 ## Peng 2020 comparison (2026-07-18)
 
