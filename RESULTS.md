@@ -1,11 +1,13 @@
 # Milestone 2 — Phase 3 training runs
 
-**STATUS (2026-07-18 late night): CURRICULUM STAGE 2 (walk+trot, one
-policy) ACCEPTANCE MET — stage6 per-clip: walk 0.029 rad / 95.4%
-survival, trot 0.109 rad / 99.4% survival (phase-free contract). Trot
-tracking degraded vs its single-clip best (0.080 → 0.109, multi-task
-interference) but well within the 0.15 bar. Next: canter (stage7), then
-Phase 4/5 (eval assets, robustness, export).**
+**STATUS (2026-07-19): CURRICULUM COMPLETE (stage7, all 3 clips, one
+policy, 4000 iters) — walk 0.031 / 95.8% ✓✓, trot 0.089 / 99.5% ✓✓,
+canter 0.090 joint (✓ under bar!) / 47.9% survival (✗, per the brief's
+pre-authorized allowance: the clip contains a 4.1 m/s fully-airborne
+gallop burst demanding 66 rad/s — 2.2× the actuator limit — plus a 167°
+pirouette; physically infeasible segments, the article's "physics
+disagrees" moment). Next: Phase 4/5 (assets, robustness, export) or
+canter salvage options (see Observations).**
 
 One row per run; one change per run (brief §4). Eval numbers from `eval.py`
 (512 envs, deterministic, randomization off) on the run's final checkpoint.
@@ -22,6 +24,7 @@ One row per run; one change per run (brief §4). Eval numbers from `eval.py`
 | `2026-07-18_17-45-50_stage4_acyclic_trot` | clips acyclic (episode = clip, end = truncation; root cause #2 fix) + injective acyclic phase encoding | 2000 (stopped: plateau from ~1300) | ~92 | 210 (cap ≈228) | 0.0905 | **survival 98.2%** (504/513 reach clip end; 9 `root_pos` deaths, all in the fast-trot final phase) | ✓✓ **STAGE-1 ACCEPTANCE MET**: joint err 0.09 < 0.15 AND survival ≫ 90%. `root_ori` deaths: 512→0. Video (one full episode, frame 0 → truncation): `videos/play/rl-video-step-0.mp4` |
 | `2026-07-18_19-36-23_stage5_phasefree_trot` | phase-free tracker: phase obs removed, preview extended to steps [1,2,15,50] (20 ms–1 s, Peng-style); contract 82→116 actor / 124 critic | 2000 (stopped: plateau from ~1400) | ~93 | 212 | **0.0802** | survival 92.6% (474/512; 38 `root_pos` deaths, phase 0.8–1.0) | ✓ **parity: acceptance still met** (0.08 < 0.15, 92.6% > 90%) with *better* tracking; survival −5.6 pts vs stage4 — drift deaths in the fast section 9→38 (xy err 0.113→0.131). The phase-free contract is validated; the fast-section drift leak is the open item |
 | `2026-07-18_20-36-50_stage6_multiclip_walktrot` | + walk clip (2-clip RSI, one policy, no clip ID — preview-only conditioning) | 3000 (still improving at 2200, ran full) | ~140* | ~230 | walk **0.0286** / trot 0.1085 | walk **95.4%** / trot **99.4%** | ✓✓ **STAGE-2 ACCEPTANCE MET** — both clips pass both bars from one policy. Interference trade: trot tracking −35% vs single-clip best (0.080→0.109) yet trot survival UP (92.6→99.4%; walk co-training regularizes). Walk deaths: 22 root_pos in its fast lead-out (phase 0.8–1.0). Per-clip videos in `videos/play/` (*2-clip reward, not comparable) |
+| `2026-07-19_stage7_multiclip_all` (run dir dated 2026-07-18) | + canter clip (3-clip RSI, 4000 iters per user) | 4000 | — | — | walk 0.0306 / trot **0.0892** / canter 0.0900 | walk 95.8% / trot **99.5%** / **canter 47.9%** | ✓✓✗ walk+trot HOLD (trot tracking improved 0.109→0.089 with more data); canter joint err under the bar but survival fails — deaths cluster at phase 0.1–0.2 (the 4.1 m/s, 100%-flight gallop burst, ref dof_vel 66 rad/s = 2.2× actuator limit — infeasible) and 0.8–1.0 (sustained 2–2.5 m/s return canter). Per the brief: acceptable failure, article content. 3 per-clip videos in `videos/play/` |
 
 ## Peng 2020 comparison (2026-07-18)
 
@@ -223,3 +226,10 @@ NOT in the batch: γ, preview horizon, termination redesign, velocity_limit.
   fail; an overlaid ghost ejects the robot at every RSI reset. Ghost now
   renders side-by-side (`ghost_y_offset = 1.0`). First two stage-1 videos
   were invalid for this reason.
+- **Same gotcha, second bite (2026-07-19)**: for clips whose path doubles
+  back (canter's 167° pirouette), a 1 m lateral offset is not enough — the
+  return leg drives the robot through the solid ghost, and the first
+  stage7 canter video showed constant robot–ghost collisions. Videos only
+  (train/eval spawn no ghost — metrics unaffected). Refilmed with
+  `env.ghost_y_offset=4.0`; rule of thumb: offset > the clip's lateral
+  path spread.
