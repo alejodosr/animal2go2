@@ -53,7 +53,7 @@ import torch
 from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab.utils.assets import retrieve_file_path
-from isaaclab.utils.math import quat_error_magnitude
+from isaaclab.utils.math import quat_apply, quat_error_magnitude
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 
@@ -62,6 +62,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import a2g2_tracking.tasks  # noqa: F401
+from a2g2_tracking.tasks.direct.a2g2_tracking.a2g2_tracking_env import _quat_yaw
 
 # animal2go2 repo root: logs/ is an SSD-backed symlink there
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -105,6 +106,12 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     jerr_sum = torch.zeros(num_envs, device=device)
     jerr_max = torch.zeros(num_envs, device=device)
     ori_sum = torch.zeros(num_envs, device=device)
+    # ori decomposition: |yaw err| and tilt (angle between body up-axes) —
+    # mean over episode AND value at episode end (what the 45° bound sees)
+    yaw_sum = torch.zeros(num_envs, device=device)
+    yaw_last = torch.zeros(num_envs, device=device)
+    tilt_sum = torch.zeros(num_envs, device=device)
+    tilt_last = torch.zeros(num_envs, device=device)
     xy_sum = torch.zeros(num_envs, device=device)
     height_sum = torch.zeros(num_envs, device=device)
     warmup_done = torch.zeros(num_envs, dtype=torch.bool, device=device)
@@ -113,9 +120,11 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
     total = 0
 
     obs = env.get_observations()
+    phase_last = torch.zeros(num_envs, device=device)
     for _ in range(args_cli.max_steps):
         with torch.inference_mode():
             # pre-step: tracking error of the current state vs the current reference
+            phase_last = lib.phase(raw._clip_idx, raw._ref_t)
             ref = raw._ref_frame()
             data = raw._robot.data
             ref_pos_w = raw._ref_root_pos_w(ref)
@@ -123,6 +132,16 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
             jerr_sum += jerr
             jerr_max = torch.maximum(jerr_max, jerr)
             ori_sum += quat_error_magnitude(data.root_quat_w, ref["root_rot"])
+            dyaw = _quat_yaw(ref["root_rot"]) - _quat_yaw(data.root_quat_w)
+            dyaw = torch.atan2(torch.sin(dyaw), torch.cos(dyaw)).abs()
+            up = torch.tensor([0.0, 0.0, 1.0], device=device).expand(num_envs, 3)
+            tilt = torch.acos(
+                (quat_apply(data.root_quat_w, up) * quat_apply(ref["root_rot"], up)).sum(dim=-1).clamp(-1.0, 1.0)
+            )
+            yaw_sum += dyaw
+            yaw_last = dyaw
+            tilt_sum += tilt
+            tilt_last = tilt
             xy_sum += (data.root_pos_w[:, :2] - ref_pos_w[:, :2]).norm(dim=-1)
             height_sum += (data.root_pos_w[:, 2] - ref_pos_w[:, 2]).abs()
             steps += 1
@@ -146,14 +165,19 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
                                 jerr=jerr_sum[i].item() / n,
                                 jmax=jerr_max[i].item(),
                                 ori=ori_sum[i].item() / n,
+                                yaw=yaw_sum[i].item() / n,
+                                yaw_end=yaw_last[i].item(),
+                                tilt=tilt_sum[i].item() / n,
+                                tilt_end=tilt_last[i].item(),
                                 xy=xy_sum[i].item() / n,
                                 height=height_sum[i].item() / n,
                                 cause=cause,
+                                phase_end=phase_last[i].item(),
                             )
                         )
                         total += 1
                     warmup_done[i] = True
-                    for buf in (steps, jerr_sum, jerr_max, ori_sum, xy_sum, height_sum):
+                    for buf in (steps, jerr_sum, jerr_max, ori_sum, yaw_sum, tilt_sum, xy_sum, height_sum):
                         buf[i] = 0.0
         if total >= args_cli.episodes:
             break
@@ -167,8 +191,9 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
         f"- deterministic policy, events randomization OFF, RSI noise OFF, max episode length {max_len} steps",
         "",
         "| clip | eps | mean len (steps) | len %max | survival | mean joint err (rad) | max joint err (rad) "
-        "| mean ori err (deg) | mean xy err (m) | mean height err (m) | terminations |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "| mean ori err (deg) | yaw err mean/end (deg) | tilt err mean/end (deg) | mean xy err (m) "
+        "| mean height err (m) | terminations |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, eps in records.items():
         if not eps:
@@ -181,8 +206,34 @@ def main(env_cfg, agent_cfg: RslRlBaseRunnerCfg):
         lines.append(
             f"| {name} | {n} | {mean('length'):.1f} | {mean('length') / max_len * 100:.1f}% | {survival * 100:.1f}% "
             f"| {mean('jerr'):.4f} | {max(e['jmax'] for e in eps):.4f} | {math.degrees(mean('ori')):.2f} "
+            f"| {math.degrees(mean('yaw')):.2f} / {math.degrees(mean('yaw_end')):.2f} "
+            f"| {math.degrees(mean('tilt')):.2f} / {math.degrees(mean('tilt_end')):.2f} "
             f"| {mean('xy'):.3f} | {mean('height'):.4f} | {hist_str} |"
         )
+
+    # death diagnostics: phase-at-termination and episode-length histograms
+    # (deaths only, timeouts excluded). Concentrated death-phase ⇒ a lethal
+    # clip segment; a sharp episode-length mode ⇒ constant time-to-death;
+    # a broad/geometric length spread ⇒ memoryless stochastic stumbling.
+    for name, eps in records.items():
+        deaths = [e for e in eps if e["cause"] != "time_out"]
+        if not deaths:
+            continue
+        lines += ["", f"### {name} — death diagnostics ({len(deaths)} deaths)", ""]
+        nbins = 10
+        phist = [0] * nbins
+        for e in deaths:
+            phist[min(int(e["phase_end"] * nbins), nbins - 1)] += 1
+        lines.append("| phase bin | " + " | ".join(f"{i / nbins:.1f}–{(i + 1) / nbins:.1f}" for i in range(nbins)) + " |")
+        lines.append("|---|" + "---|" * nbins)
+        lines.append("| deaths | " + " | ".join(str(c) for c in phist) + " |")
+        lhist = [0] * nbins
+        for e in deaths:
+            lhist[min(e["length"] * nbins // max_len, nbins - 1)] += 1
+        lines.append("")
+        lines.append("| ep len (steps) | " + " | ".join(f"{i * max_len // nbins}–{(i + 1) * max_len // nbins}" for i in range(nbins)) + " |")
+        lines.append("|---|" + "---|" * nbins)
+        lines.append("| deaths | " + " | ".join(str(c) for c in lhist) + " |")
 
     report = "\n".join(lines) + "\n"
     out_path = args_cli.out or os.path.join(run_dir, "eval_results.md")

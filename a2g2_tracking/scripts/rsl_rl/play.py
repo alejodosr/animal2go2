@@ -43,6 +43,12 @@ parser.add_argument(
 parser.add_argument("--motion", type=str, default=None, help="Clip name for --replay (default: env_idx %% num_clips).")
 parser.add_argument("--replay_loops", type=float, default=2.0, help="Clip loops to replay.")
 parser.add_argument("--ghost", action="store_true", default=False, help="Spawn the transparent reference ghost.")
+parser.add_argument(
+    "--start_at_zero",
+    action="store_true",
+    default=False,
+    help="Start every episode at clip frame 0 (film one whole episode start-to-truncation).",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -184,6 +190,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.enable_ghost = args_cli.ghost
+    env_cfg.rsi_start_at_zero = args_cli.start_at_zero
     if args_cli.video:
         # follow camera on the robot root (not settable via hydra: asset_name
         # defaults to None and cfg overrides are type-checked against that)

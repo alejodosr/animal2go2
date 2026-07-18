@@ -80,12 +80,21 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     decimation = 4
     episode_length_s = 10.0
     action_scale = 0.25
+    # PD-target centering: "ref" = ref_dof_pos(t+1) + scale·a (Peng 2020-style,
+    # |a|≈1 covers corrections; zero action holds the reference — stage2) vs
+    # "default" = default_pose + scale·a (stage1: trot extremes need |a|≈5,
+    # RESULTS.md action-reach analysis)
+    action_center = "ref"
     # obs: gravity 3 + ang vel 3 + dof pos 12 + dof vel 12 + prev action 12
-    #      + K×(ref dof 12 + ref root vel 6) + phase 2 = 44 + 18K
+    #      + K×(ref dof 12 + ref root vel 6) + phase 2 + heading err 2
+    #      = 46 + 18K. Heading err (sin/cos of ref-relative yaw) added for
+    #      stage3: without it yaw drift is actor-unobservable and 100% of
+    #      stage2 episodes died at the 45° ori bound (RESULTS.md); Peng 2020
+    #      observes IMU yaw. Hardware source: IMU yaw / odometry.
     num_ref_targets = 2  # K future reference frames in the actor obs
     action_space = 12
-    observation_space = 80
-    state_space = 88  # critic = actor obs + lin vel 3 + contacts 4 + height 1
+    observation_space = 82
+    state_space = 90  # critic = actor obs + lin vel 3 + contacts 4 + height 1
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -119,20 +128,40 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     # events
     events: EventCfg = EventCfg()
 
-    # robot — keep the stock actuator config; its PD gains (Kp=25, Kd=0.5) and
-    # torque limits go into the policy contract for the MuJoCo port
-    robot: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    # robot — stock Go2 actuator except: PD gains kp=100/kd=1.0 (kp=25 has a
+    # 0.17 rad open-loop tracking floor on the trot, kp=100 → 0.09 with
+    # diminishing returns beyond — pd_floor.py sweep, RESULTS.md; Peng 2020
+    # uses kp=220 on the heavier Laikago), and velocity_limit 21 → 30 rad/s
+    # per the Go2 datasheet (stock 21 derates swing torque: the kp-independent
+    # front-calf floor error ~0.26 rad; ref dof_vel peaks 38). Gains + limits
+    # go into the policy contract for the MuJoCo port.
+    robot: ArticulationCfg = UNITREE_GO2_CFG.replace(
+        prim_path="/World/envs/env_.*/Robot",
+        actuators={
+            "base_legs": UNITREE_GO2_CFG.actuators["base_legs"].replace(
+                stiffness=100.0, damping=1.0, velocity_limit=30.0
+            )
+        },
+    )
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*", history_length=3, update_period=0.005, track_air_time=True
     )
 
-    # motion library
+    # motion library — clips are ACYCLIC as of stage4: they are raw captures
+    # with lead-ins/outs (trot = 36% crouch → stand → trot ending mid-flight;
+    # canter contains a 167° turn), so the cyclic wrap seam teleports the
+    # reference and killed 511/512 stage3 episodes (RESULTS.md root cause #2).
+    # Episode = the clip; clip end is a truncation (bootstrapped), not a death.
     motion_files: list = [f"{name}.pkl" for name in (WALK_CLIP, TROT_CLIP, CANTER_CLIP)]
-    motion_cyclic: list = [True, True, True]
+    motion_cyclic: list = [False, False, False]
 
     # reference state initialization noise
     rsi_joint_pos_noise = 0.05  # rad, uniform ±
     rsi_root_z_noise = 0.02  # m, uniform [0, +z]
+    # start every episode at clip frame 0 (play.py --start_at_zero: film one
+    # whole episode, crouch → stand → trot → clean truncation); training keeps
+    # uniform RSI
+    rsi_start_at_zero = False
 
     # early termination bounds (loose — they truncate hopeless rollouts)
     # keep tight: this bound is itself the anti-drift learning signal — the
@@ -142,21 +171,26 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     term_root_ori_err = 0.785  # rad (45°)
     term_joint_err = 1.0  # rad, mean over 12 dofs
 
-    # reward weights (DeepMimic-style exp kernels; brief §3 table)
+    # reward weights — Peng 2020 Eq. 4–9 structure and coefficients (stage2
+    # alignment; stage1a–d used a different split, see RESULTS.md), plus our
+    # contact-match term and the two penalties on top
     rew_joint_pos_w = 0.5
     rew_joint_pos_k = 5.0
     rew_joint_vel_w = 0.05
     rew_joint_vel_k = 0.1
-    rew_root_ori_w = 0.15
-    rew_root_ori_k = 10.0
-    # doubled from 0.15 after stage1c: drift is integrated velocity error, and
-    # velocity (unlike position) is actor-observable via stance-leg dof_vel
-    rew_root_vel_w = 0.30
-    rew_root_vel_k = 2.0
-    # full 3D root position (DeepMimic com term) — replaces the height-only
-    # term after run 1: xy drift ended 100% of eval episodes (RESULTS.md)
-    rew_root_pos_w = 0.1
-    rew_root_pos_k = 10.0
+    # end-effector: root-frame foot positions vs sim-generated ref cache
+    # (paper Eq. 7 — its 2nd-largest tracking term; needs <clip>_feet.npz)
+    rew_ee_w = 0.2
+    rew_ee_k = 40.0
+    # root pose, one kernel over global pos + ori (paper Eq. 8)
+    rew_root_pose_w = 0.15
+    rew_root_pose_kp = 20.0
+    rew_root_pose_ko = 10.0
+    # root velocity, lin + ang with separate coefficients (paper Eq. 9; the
+    # 0.2 ang coefficient matters — a shared k=2 saturates on trot ang rates)
+    rew_root_vel_w = 0.1
+    rew_root_vel_kl = 2.0
+    rew_root_vel_ka = 0.2
     rew_contact_match_w = 0.1
     rew_action_rate_w = -0.01
     rew_torque_w = -1.0e-4
@@ -166,6 +200,9 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
 
     # modes (set by play.py, not for training)
     kinematic_replay = False  # force-set reference states every step (Phase 2 gate)
+    # PD-floor diagnostic (scripts/pd_floor.py): command ref dof_pos directly as
+    # PD targets, no policy — measures the tracking error floor of the actuator
+    pd_replay = False
     replay_clip: str | None = None  # clip name for replay; None → env_idx % num_clips
     enable_ghost = False  # transparent reference ghost robot (replay/videos)
     # ghost renders side-by-side, not overlaid: the Go2 USD is instanceable, so

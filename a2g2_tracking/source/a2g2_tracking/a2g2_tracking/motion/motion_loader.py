@@ -144,6 +144,10 @@ class MotionClip:
     root_ang_vel: torch.Tensor  # (N, 3)
     dof_vel: torch.Tensor  # (N, 12)
     foot_contacts: torch.Tensor  # (N, 4) float 0/1, canonical FR, FL, RR, RL
+    # root-frame foot positions (N, 4, 3), canonical leg order — from the
+    # sim-generated `<clip>_feet.npz` cache (scripts/gen_feet_cache.py); None
+    # if the cache is absent. Root-relative → periodic, no wrap unwrapping.
+    feet_pos_root: torch.Tensor | None = None
 
 
 def _central_diff(x: torch.Tensor, dt: float) -> torch.Tensor:
@@ -219,6 +223,14 @@ def load_motion(
     sign = torch.cat([torch.ones(1, dtype=dtype), 1.0 - 2.0 * (torch.cumsum(flip, dim=0) % 2)])
     root_rot = root_rot * sign.unsqueeze(-1)
 
+    feet_pos_root = None
+    feet_cache = path.with_name(path.stem + "_feet.npz")
+    if feet_cache.exists():
+        cache = np.load(feet_cache)
+        feet_pos_root = torch.as_tensor(cache["feet_pos_root"], dtype=dtype)
+        if feet_pos_root.shape != (n, 4, 3):
+            raise ValueError(f"{feet_cache.name}: shape {tuple(feet_pos_root.shape)} != ({n}, 4, 3)")
+
     clip = MotionClip(
         name=str(data.get("source", path.stem)),
         fps=fps,
@@ -230,9 +242,12 @@ def load_motion(
         root_ang_vel=_quat_ang_vel(root_rot, dt),
         dof_vel=_central_diff(dof_pos, dt),
         foot_contacts=foot_contacts,
+        feet_pos_root=feet_pos_root,
     )
-    for field in ("root_pos", "root_rot", "dof_pos", "root_lin_vel", "root_ang_vel", "dof_vel", "foot_contacts"):
+    for field in ("root_pos", "root_rot", "dof_pos", "root_lin_vel", "root_ang_vel", "dof_vel", "foot_contacts", "feet_pos_root"):
         t = getattr(clip, field)
+        if t is None:
+            continue
         if not torch.isfinite(t).all():
             raise ValueError(f"{path.name}: non-finite values in {field}")
         setattr(clip, field, t.to(device))

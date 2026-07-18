@@ -25,6 +25,8 @@ class MotionLib:
     FIELDS = ("root_pos", "root_rot", "dof_pos", "root_lin_vel", "root_ang_vel", "dof_vel", "foot_contacts")
     # contacts are binary — nearest-frame, never blended
     _NEAREST = ("foot_contacts",)
+    # optional per-clip fields, included only when ALL clips provide them
+    _OPTIONAL = ("feet_pos_root",)
 
     def __init__(self, clips: list[MotionClip], cyclic: list[bool], device: str | torch.device = "cpu"):
         if len(clips) == 0:
@@ -47,7 +49,11 @@ class MotionLib:
         # segment frame N-1 → frame 0, acyclic ones end at their last frame
         self.durations = torch.where(self.cyclic, lengths / self.fps, (lengths - 1) / self.fps)
 
-        for field in self.FIELDS:
+        self._fields = list(self.FIELDS)
+        for field in self._OPTIONAL:
+            if all(getattr(c, field) is not None for c in clips):
+                self._fields.append(field)
+        for field in self._fields:
             flat = torch.cat([getattr(c, field) for c in clips], dim=0).to(self.device)
             setattr(self, field, flat)
 
@@ -123,12 +129,14 @@ class MotionLib:
         """
         g0, g1, blend = self._frame_indices(clip_idx, t)[:3]
         out: dict[str, torch.Tensor] = {}
-        for field in self.FIELDS:
+        for field in self._fields:
             flat = getattr(self, field)
             if field == "root_rot":
                 out[field] = quat_slerp(flat[g0], flat[g1], blend)
             elif field in self._NEAREST:
                 out[field] = torch.where(blend < 0.5, flat[g0], flat[g1])
+            elif flat.dim() == 3:  # (N, 4, 3) feet — broadcast blend over legs
+                out[field] = torch.lerp(flat[g0], flat[g1], blend.unsqueeze(-1))
             else:
                 out[field] = torch.lerp(flat[g0], flat[g1], blend)
         out["root_pos"] = self._unwrapped_root_pos(clip_idx, t)

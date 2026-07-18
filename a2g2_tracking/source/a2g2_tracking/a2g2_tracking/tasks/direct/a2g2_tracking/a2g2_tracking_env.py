@@ -32,6 +32,12 @@ from a2g2_tracking.motion.motion_loader import LEG_ORDER, make_dof_index_map
 from .a2g2_tracking_env_cfg import MOTIONS_DIR, A2g2TrackingEnvCfg
 
 
+def _quat_yaw(q: torch.Tensor) -> torch.Tensor:
+    """Yaw (rad) of a wxyz quaternion batch (..., 4)."""
+    w, x, y, z = q.unbind(-1)
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
 class A2g2TrackingEnv(DirectRLEnv):
     cfg: A2g2TrackingEnvCfg
 
@@ -49,6 +55,12 @@ class A2g2TrackingEnv(DirectRLEnv):
             cyclic=list(self.cfg.motion_cyclic),
             device=self.device,
         )
+        needs_feet = self.cfg.rew_ee_w != 0.0 and not (self.cfg.kinematic_replay or self.cfg.pd_replay)
+        if needs_feet and "feet_pos_root" not in self._motion_lib._fields:
+            raise ValueError(
+                "rew_ee_w != 0 but some clips lack a <clip>_feet.npz cache — "
+                "generate them with scripts/gen_feet_cache.py (kinematic replay)"
+            )
         if abs(self._motion_lib.fps * self.step_dt - 1.0) > 1e-6:
             raise ValueError(
                 f"control rate {1.0 / self.step_dt:.1f} Hz != motion fps {self._motion_lib.fps} — "
@@ -77,14 +89,21 @@ class A2g2TrackingEnv(DirectRLEnv):
         else:
             self._replay_clip_idx = None
 
+        # action-saturation diagnostics (RESULTS.md open item): per-env
+        # accumulators, logged per episode in _reset_idx
+        self._steps_since_reset = torch.zeros(self.num_envs, device=self.device)
+        self._action_abs_sum = torch.zeros(self.num_envs, device=self.device)
+        self._action_abs_max = torch.zeros(self.num_envs, device=self.device)
+        self._clamp_frac_sum = torch.zeros(self.num_envs, device=self.device)
+
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
                 "joint_pos_tracking",
                 "joint_vel_tracking",
-                "root_ori_tracking",
+                "ee_tracking",
+                "root_pose_tracking",
                 "root_vel_tracking",
-                "root_pos_tracking",
                 "contact_match",
                 "action_rate",
                 "torque",
@@ -134,12 +153,25 @@ class A2g2TrackingEnv(DirectRLEnv):
         # compared against ref(t + dt)
         self._ref_t += self.step_dt
         self._actions = actions.clone()
-        if not self.cfg.kinematic_replay:
-            targets_sim = (
-                self._robot.data.default_joint_pos + self.cfg.action_scale * self._actions[:, self._perm_c2s]
-            )
+        if self.cfg.pd_replay:
+            # command the reference pose the robot is tracked against this step
+            self._processed_actions = self._ref_frame()["dof_pos"]
+        elif not self.cfg.kinematic_replay:
+            if self.cfg.action_center == "ref":
+                # center on the pose being tracked this step: zero action holds
+                # the reference, |a|≈1 covers corrections (vs |a|≈5 to reach
+                # trot extremes from the static default — RESULTS.md)
+                center = self._ref_frame()["dof_pos"]
+            else:
+                center = self._robot.data.default_joint_pos
+            targets_sim = center + self.cfg.action_scale * self._actions[:, self._perm_c2s]
             limits = self._robot.data.soft_joint_pos_limits
             self._processed_actions = targets_sim.clamp(limits[..., 0], limits[..., 1])
+            abs_a = self._actions.abs()
+            self._steps_since_reset += 1.0
+            self._action_abs_sum += abs_a.mean(dim=-1)
+            self._action_abs_max = torch.maximum(self._action_abs_max, abs_a.amax(dim=-1))
+            self._clamp_frac_sum += (self._processed_actions != targets_sim).float().mean(dim=-1)
         if self._ghost is not None:
             self._write_ref_state(
                 self._ghost, self._ref_frame(), self._robot._ALL_INDICES, y_offset=self.cfg.ghost_y_offset
@@ -181,6 +213,13 @@ class A2g2TrackingEnv(DirectRLEnv):
         forces = self._contact_sensor.data.net_forces_w_history[:, :, self._feet_ids_sensor]
         return (forces.norm(dim=-1).max(dim=1)[0] > self.cfg.contact_force_threshold).float()
 
+    def _feet_pos_root(self) -> torch.Tensor:
+        """Foot link positions in the root frame (E, 4, 3), canonical order."""
+        data = self._robot.data
+        rel = data.body_pos_w[:, self._feet_ids_body] - data.root_pos_w.unsqueeze(1)
+        quat = data.root_quat_w.unsqueeze(1).expand(-1, 4, -1)
+        return quat_apply_inverse(quat, rel)
+
     def _get_observations(self) -> dict:
         self._previous_actions = self._actions.clone()
         data = self._robot.data
@@ -196,7 +235,17 @@ class A2g2TrackingEnv(DirectRLEnv):
             ref_targets.append(quat_apply_inverse(quat, ref_k["root_lin_vel"]))
             ref_targets.append(quat_apply_inverse(quat, ref_k["root_ang_vel"]))
 
-        phase = 2.0 * math.pi * self._motion_lib.phase(self._clip_idx, self._ref_t)
+        # phase angle: full turn for cyclic clips (wrap-continuous), HALF turn
+        # for acyclic ones — sin/cos(2πφ) maps φ=0 and φ=1 to the same point,
+        # which for an acyclic clip aliases its first and last frames
+        phase = self._motion_lib.phase(self._clip_idx, self._ref_t)
+        turn = torch.where(
+            self._motion_lib.cyclic[self._clip_idx], 2.0 * math.pi, math.pi
+        )
+        phase = turn * phase
+        # heading error: ref-relative yaw (stage3) — the only world-frame-
+        # derived scalar in the actor obs; hardware-realizable via IMU yaw
+        dyaw = _quat_yaw(self._ref_frame()["root_rot"]) - _quat_yaw(quat)
         obs = torch.cat(
             [
                 data.projected_gravity_b,
@@ -207,6 +256,8 @@ class A2g2TrackingEnv(DirectRLEnv):
                 *ref_targets,
                 torch.sin(phase).unsqueeze(-1),
                 torch.cos(phase).unsqueeze(-1),
+                torch.sin(dyaw).unsqueeze(-1),
+                torch.cos(dyaw).unsqueeze(-1),
             ],
             dim=-1,
         )
@@ -227,10 +278,13 @@ class A2g2TrackingEnv(DirectRLEnv):
         joint_pos_err = (data.joint_pos - ref["dof_pos"]).square().sum(dim=-1)
         joint_vel_err = (data.joint_vel - ref["dof_vel"]).square().sum(dim=-1)
         ori_err = quat_error_magnitude(data.root_quat_w, ref["root_rot"])
-        vel_err = (data.root_lin_vel_w - ref["root_lin_vel"]).square().sum(dim=-1) + (
-            data.root_ang_vel_w - ref["root_ang_vel"]
-        ).square().sum(dim=-1)
+        lin_vel_err = (data.root_lin_vel_w - ref["root_lin_vel"]).square().sum(dim=-1)
+        ang_vel_err = (data.root_ang_vel_w - ref["root_ang_vel"]).square().sum(dim=-1)
         root_pos_err = (data.root_pos_w - self._ref_root_pos_w(ref)).square().sum(dim=-1)
+        if "feet_pos_root" in ref:
+            ee_err = (self._feet_pos_root() - ref["feet_pos_root"]).square().sum(dim=(-1, -2))
+        else:  # replay/diagnostic modes may run without the feet caches
+            ee_err = torch.zeros_like(joint_pos_err)
         contact_match = (self._foot_contacts() == ref["foot_contacts"]).float().mean(dim=-1)
         action_rate = (self._actions - self._previous_actions).square().sum(dim=-1)
         torque = data.applied_torque.square().sum(dim=-1)
@@ -238,9 +292,11 @@ class A2g2TrackingEnv(DirectRLEnv):
         rewards = {
             "joint_pos_tracking": cfg.rew_joint_pos_w * torch.exp(-cfg.rew_joint_pos_k * joint_pos_err),
             "joint_vel_tracking": cfg.rew_joint_vel_w * torch.exp(-cfg.rew_joint_vel_k * joint_vel_err),
-            "root_ori_tracking": cfg.rew_root_ori_w * torch.exp(-cfg.rew_root_ori_k * ori_err.square()),
-            "root_vel_tracking": cfg.rew_root_vel_w * torch.exp(-cfg.rew_root_vel_k * vel_err),
-            "root_pos_tracking": cfg.rew_root_pos_w * torch.exp(-cfg.rew_root_pos_k * root_pos_err),
+            "ee_tracking": cfg.rew_ee_w * torch.exp(-cfg.rew_ee_k * ee_err),
+            "root_pose_tracking": cfg.rew_root_pose_w
+            * torch.exp(-cfg.rew_root_pose_kp * root_pos_err - cfg.rew_root_pose_ko * ori_err.square()),
+            "root_vel_tracking": cfg.rew_root_vel_w
+            * torch.exp(-cfg.rew_root_vel_kl * lin_vel_err - cfg.rew_root_vel_ka * ang_vel_err),
             "contact_match": cfg.rew_contact_match_w * contact_match,
             "action_rate": cfg.rew_action_rate_w * action_rate,
             "torque": cfg.rew_torque_w * torque,
@@ -287,7 +343,7 @@ class A2g2TrackingEnv(DirectRLEnv):
         if self._ghost is not None:
             self._ghost.reset(env_ids)
         super()._reset_idx(env_ids)
-        if len(env_ids) == self.num_envs and not self.cfg.kinematic_replay:
+        if len(env_ids) == self.num_envs and not (self.cfg.kinematic_replay or self.cfg.rsi_start_at_zero):
             # spread resets in time to avoid synchronized timeout spikes
             self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
@@ -302,7 +358,7 @@ class A2g2TrackingEnv(DirectRLEnv):
         else:
             clip_idx, t0 = self._motion_lib.sample(len(env_ids))
             self._clip_idx[env_ids] = clip_idx
-            self._ref_t[env_ids] = t0
+            self._ref_t[env_ids] = 0.0 if self.cfg.rsi_start_at_zero else t0
 
         ref = self._motion_lib.get_frame(self._clip_idx[env_ids], self._ref_t[env_ids])
         root_pos = ref["root_pos"] + self._terrain.env_origins[env_ids]
@@ -328,6 +384,14 @@ class A2g2TrackingEnv(DirectRLEnv):
         for key in self._episode_sums.keys():
             extras["Episode_Reward/" + key] = torch.mean(self._episode_sums[key][env_ids]) / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
+        steps = self._steps_since_reset[env_ids].clamp(min=1.0)
+        extras["Action/abs_mean"] = (self._action_abs_sum[env_ids] / steps).mean()
+        extras["Action/abs_max"] = self._action_abs_max[env_ids].max()
+        extras["Action/clamp_frac"] = (self._clamp_frac_sum[env_ids] / steps).mean()
+        self._steps_since_reset[env_ids] = 0.0
+        self._action_abs_sum[env_ids] = 0.0
+        self._action_abs_max[env_ids] = 0.0
+        self._clamp_frac_sum[env_ids] = 0.0
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
         extras = dict()
