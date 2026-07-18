@@ -86,15 +86,20 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     # RESULTS.md action-reach analysis)
     action_center = "ref"
     # obs: gravity 3 + ang vel 3 + dof pos 12 + dof vel 12 + prev action 12
-    #      + K×(ref dof 12 + ref root vel 6) + phase 2 + heading err 2
-    #      = 46 + 18K. Heading err (sin/cos of ref-relative yaw) added for
-    #      stage3: without it yaw drift is actor-unobservable and 100% of
-    #      stage2 episodes died at the 45° ori bound (RESULTS.md); Peng 2020
-    #      observes IMU yaw. Hardware source: IMU yaw / odometry.
-    num_ref_targets = 2  # K future reference frames in the actor obs
+    #      + K×(ref dof 12 + ref root vel 6) + heading err 2 = 44 + 18K.
+    # stage5 (phase-free tracker): NO phase input — the policy conditions
+    # only on the reference preview, à la Peng 2020 (which has no phase
+    # either; its 4-frame goal spans ~1 s). Makes the policy a general
+    # reference-follower: any spliced/looped reference stream works at
+    # deployment. Preview steps are time-faithful to the paper's [1,2,10,30]
+    # @30 Hz → 20 ms, 40 ms, 0.3 s, 1.0 s @50 Hz. Near an acyclic clip end
+    # the preview clamps to the final frame. Heading err (sin/cos of
+    # ref-relative yaw, stage3) stays: it is a tracking-error signal, not a
+    # clip-position signal; hardware source IMU yaw / odometry.
+    ref_target_steps: list = [1, 2, 15, 50]  # control steps ahead
     action_space = 12
-    observation_space = 82
-    state_space = 90  # critic = actor obs + lin vel 3 + contacts 4 + height 1
+    observation_space = 116
+    state_space = 124  # critic = actor obs + lin vel 3 + contacts 4 + height 1
 
     # simulation
     sim: SimulationCfg = SimulationCfg(

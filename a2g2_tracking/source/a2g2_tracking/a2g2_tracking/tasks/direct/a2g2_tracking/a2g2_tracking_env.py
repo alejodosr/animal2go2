@@ -16,7 +16,6 @@ Interface contract (Milestone 3 depends on this):
 
 from __future__ import annotations
 
-import math
 import torch
 from collections.abc import Sequence
 
@@ -228,23 +227,16 @@ class A2g2TrackingEnv(DirectRLEnv):
         dof_vel_c = data.joint_vel[:, self._perm_s2c]
 
         ref_targets = []
-        for k in range(1, self.cfg.num_ref_targets + 1):
+        for k in self.cfg.ref_target_steps:
             ref_k = self._ref_frame(dt_ahead=k * self.step_dt)
             ref_targets.append(ref_k["dof_pos"][:, self._perm_s2c])
             # reference root velocities in the robot's CURRENT base frame
             ref_targets.append(quat_apply_inverse(quat, ref_k["root_lin_vel"]))
             ref_targets.append(quat_apply_inverse(quat, ref_k["root_ang_vel"]))
 
-        # phase angle: full turn for cyclic clips (wrap-continuous), HALF turn
-        # for acyclic ones — sin/cos(2πφ) maps φ=0 and φ=1 to the same point,
-        # which for an acyclic clip aliases its first and last frames
-        phase = self._motion_lib.phase(self._clip_idx, self._ref_t)
-        turn = torch.where(
-            self._motion_lib.cyclic[self._clip_idx], 2.0 * math.pi, math.pi
-        )
-        phase = turn * phase
         # heading error: ref-relative yaw (stage3) — the only world-frame-
-        # derived scalar in the actor obs; hardware-realizable via IMU yaw
+        # derived scalar in the actor obs; hardware-realizable via IMU yaw.
+        # NO phase input (stage5): the preview is the only clip conditioning.
         dyaw = _quat_yaw(self._ref_frame()["root_rot"]) - _quat_yaw(quat)
         obs = torch.cat(
             [
@@ -254,8 +246,6 @@ class A2g2TrackingEnv(DirectRLEnv):
                 dof_vel_c,
                 self._actions,
                 *ref_targets,
-                torch.sin(phase).unsqueeze(-1),
-                torch.cos(phase).unsqueeze(-1),
                 torch.sin(dyaw).unsqueeze(-1),
                 torch.cos(dyaw).unsqueeze(-1),
             ],
