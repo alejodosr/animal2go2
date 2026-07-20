@@ -40,9 +40,32 @@ parser.add_argument(
     default=False,
     help="Kinematic replay gate: force-set reference states every step, no policy. Prints ground z-offset stats.",
 )
-parser.add_argument("--motion", type=str, default=None, help="Clip name for --replay (default: env_idx %% num_clips).")
+parser.add_argument(
+    "--motion",
+    type=str,
+    default=None,
+    help="Pin every episode to this clip (policy play and --replay; default: random RSI clip / env_idx %% num_clips).",
+)
 parser.add_argument("--replay_loops", type=float, default=2.0, help="Clip loops to replay.")
 parser.add_argument("--ghost", action="store_true", default=False, help="Spawn the transparent reference ghost.")
+parser.add_argument(
+    "--pip_video",
+    action="store_true",
+    default=False,
+    help="Record a side-by-side comparison video: reference ghost (left) | policy (right). Implies --ghost.",
+)
+parser.add_argument(
+    "--ghost_y_offset",
+    type=float,
+    default=None,
+    help="Lateral ghost offset [m] (default: cfg value 1.0, or 3.0 in --pip_video so each camera frames its own robot).",
+)
+parser.add_argument(
+    "--no_early_term",
+    action="store_true",
+    default=False,
+    help="Disable ALL early terminations (drift bounds and falls) to watch free-running behavior to clip end.",
+)
 parser.add_argument(
     "--start_at_zero",
     action="store_true",
@@ -56,7 +79,7 @@ AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
 # always enable cameras to record video
-if args_cli.video:
+if args_cli.video or args_cli.pip_video:
     args_cli.enable_cameras = True
 
 # clear out sys.argv for Hydra
@@ -69,6 +92,7 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import gymnasium as gym
+import numpy as np
 import os
 import time
 import torch
@@ -115,6 +139,38 @@ def _foot_collider_radius(env) -> float | None:
     except Exception as exc:  # pragma: no cover - diagnostic only
         print(f"[WARN] could not read foot collider radius: {exc}")
     return None
+
+
+_PIP_PANES = {"ghost": "GHOST (reference)", "robot": "RL POLICY"}
+_PIP_BANNER_H = 32  # px; keeps 480 + 32 = 512 divisible by the codec macro block
+_pip_banners: dict[str, np.ndarray] = {}
+
+
+def _pip_banner(width: int, text: str) -> np.ndarray:
+    """Black strip with the centered pane label, rendered once and cached."""
+    if text not in _pip_banners:
+        from PIL import Image, ImageDraw, ImageFont
+
+        img = Image.new("RGB", (width, _PIP_BANNER_H), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        font = ImageFont.load_default(size=20)
+        x0, y0, x1, y1 = draw.textbbox((0, 0), text, font=font)
+        draw.text(((width - x1 + x0) // 2 - x0, (_PIP_BANNER_H - y1 + y0) // 2 - y0), text, (255, 255, 255), font)
+        _pip_banners[text] = np.asarray(img, dtype=np.uint8)
+    return _pip_banners[text]
+
+
+def _pip_frame(raw_env) -> np.ndarray:
+    """Stitch the labelled ghost|robot chase-cam frames of env 0 into one RGB image."""
+    halves = []
+    for name, label in _PIP_PANES.items():
+        rgb = raw_env._pip_cams[name].data.output["rgb"][0].detach().cpu().numpy()
+        if rgb.dtype != np.uint8:
+            rgb = (255.0 * np.clip(rgb, 0.0, 1.0)).astype(np.uint8)
+        halves.append(np.concatenate([_pip_banner(rgb.shape[1], label), rgb], axis=0))
+    # 16 px keeps the stitched width a multiple of the codec macro block (no resize)
+    divider = np.full((halves[0].shape[0], 16, 3), 255, dtype=np.uint8)
+    return np.concatenate([halves[0], divider, halves[1]], axis=1)
 
 
 def run_replay(env_cfg, task_name: str):
@@ -189,8 +245,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
-    env_cfg.enable_ghost = args_cli.ghost
+    env_cfg.enable_ghost = args_cli.ghost or args_cli.pip_video
     env_cfg.rsi_start_at_zero = args_cli.start_at_zero
+    env_cfg.replay_clip = args_cli.motion
+    if args_cli.no_early_term:
+        # no deaths at all: only clip end / timeout truncates the episode
+        env_cfg.term_root_pos_err = 1.0e9
+        env_cfg.term_root_ori_err = 1.0e9
+        env_cfg.term_joint_err = 1.0e9
+        env_cfg.term_base_contact = False
+    if args_cli.pip_video:
+        env_cfg.pip_camera = True
+        if args_cli.num_envs is None:
+            env_cfg.scene.num_envs = 1
+    if args_cli.ghost_y_offset is not None:
+        env_cfg.ghost_y_offset = args_cli.ghost_y_offset
+    elif args_cli.pip_video:
+        env_cfg.ghost_y_offset = 3.0
     if args_cli.video:
         # follow camera on the robot root (not settable via hydra: asset_name
         # defaults to None and cfg overrides are type-checked against that)
@@ -287,6 +358,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs = env.get_observations()
     timestep = 0
+    pip_frames: list[np.ndarray] = []
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -295,17 +367,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # agent stepping
             actions = policy(obs)
             # env stepping
-            obs, _, _, _ = env.step(actions)
-        if args_cli.video:
+            obs, _, dones, _ = env.step(actions)
+        if args_cli.pip_video:
+            pip_frames.append(_pip_frame(env.unwrapped))
+        if args_cli.video or args_cli.pip_video:
             timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
+                break
+            # with --start_at_zero the first done closes one whole episode —
+            # stop there so the pip video never spans a reset (ghost teleports)
+            if args_cli.pip_video and args_cli.start_at_zero and dones.any():
                 break
 
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    if pip_frames:
+        import imageio.v2 as imageio
+
+        clip_tag = args_cli.motion or "mixed"
+        pip_dir = os.path.join(log_dir, "videos", "play")
+        os.makedirs(pip_dir, exist_ok=True)
+        pip_path = os.path.join(pip_dir, f"pip_{clip_tag}.mp4")
+        fps = round(1.0 / dt)
+        imageio.mimwrite(pip_path, pip_frames, fps=fps, quality=8)
+        print(f"[INFO] Side-by-side video ({len(pip_frames)} frames @ {fps} fps): {pip_path}", flush=True)
 
     # close the simulator
     env.close()

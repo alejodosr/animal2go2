@@ -175,6 +175,9 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     term_root_pos_err = 0.5  # m
     term_root_ori_err = 0.785  # rad (45°)
     term_joint_err = 1.0  # rad, mean over 12 dofs
+    # falls (base contact) end the episode; play.py --no_early_term turns this
+    # off too so a video keeps rolling through a fall
+    term_base_contact = True
 
     # reward weights — Peng 2020 Eq. 4–9 structure and coefficients (stage2
     # alignment; stage1a–d used a different split, see RESULTS.md), plus our
@@ -214,3 +217,11 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     # collision_enabled=False fails on its instance proxies and an overlapped
     # ghost physically ejects the robot at every RSI reset
     ghost_y_offset = 1.0  # m, world +y
+    # side-by-side comparison video (play.py --pip_video): two chase cameras,
+    # one framing the ghost and one framing the robot; play.py stitches the
+    # per-step frames into a single ghost|robot mp4. Requires enable_ghost.
+    pip_camera = False
+    pip_cam_width = 640  # px, per half
+    pip_cam_height = 480
+    pip_cam_eye_offset = (1.8, 1.8, 0.9)  # m, world-frame offset from tracked root
+    pip_cam_lookat_offset = (0.0, 0.0, 0.2)

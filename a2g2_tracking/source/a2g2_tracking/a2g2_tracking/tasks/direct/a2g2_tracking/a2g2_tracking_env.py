@@ -22,7 +22,7 @@ from collections.abc import Sequence
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sensors import ContactSensor
+from isaaclab.sensors import Camera, CameraCfg, ContactSensor
 from isaaclab.utils.math import quat_apply_inverse, quat_error_magnitude, sample_uniform
 
 from a2g2_tracking.motion.motion_lib import MotionLib
@@ -80,6 +80,10 @@ class A2g2TrackingEnv(DirectRLEnv):
         self._feet_ids_body = [self._robot.find_bodies(f"{leg}_foot")[0][0] for leg in LEG_ORDER]
         self._base_id_sensor, _ = self._contact_sensor.find_bodies("base")
 
+        if self._pip_cams:
+            self._pip_cam_eye = torch.tensor(self.cfg.pip_cam_eye_offset, device=self.device)
+            self._pip_cam_lookat = torch.tensor(self.cfg.pip_cam_lookat_offset, device=self.device)
+
         # replay clip override
         if self.cfg.replay_clip is not None:
             if self.cfg.replay_clip not in self._motion_lib.names:
@@ -128,6 +132,22 @@ class A2g2TrackingEnv(DirectRLEnv):
             )
             self._ghost = Articulation(ghost_cfg)
             self.scene.articulations["ghost"] = self._ghost
+        self._pip_cams = {}
+        if self.cfg.pip_camera:
+            if self._ghost is None:
+                raise ValueError("pip_camera requires enable_ghost")
+            for name in ("ghost", "robot"):
+                cam = Camera(
+                    CameraCfg(
+                        prim_path=f"/World/envs/env_.*/PipCam{name.capitalize()}",
+                        width=self.cfg.pip_cam_width,
+                        height=self.cfg.pip_cam_height,
+                        data_types=["rgb"],
+                        spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, clipping_range=(0.1, 200.0)),
+                    )
+                )
+                self.scene.sensors[f"pip_cam_{name}"] = cam
+                self._pip_cams[name] = cam
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
@@ -175,6 +195,16 @@ class A2g2TrackingEnv(DirectRLEnv):
             self._write_ref_state(
                 self._ghost, self._ref_frame(), self._robot._ALL_INDICES, y_offset=self.cfg.ghost_y_offset
             )
+        if self._pip_cams:
+            # chase cams: fixed world-axis offset from each tracked root (same
+            # framing as the viewer follow cam)
+            for name, root_pos in (
+                ("ghost", self._ghost.data.root_pos_w),
+                ("robot", self._robot.data.root_pos_w),
+            ):
+                self._pip_cams[name].set_world_poses_from_view(
+                    root_pos + self._pip_cam_eye, root_pos + self._pip_cam_lookat
+                )
 
     def _apply_action(self):
         if self.cfg.kinematic_replay:
@@ -314,6 +344,8 @@ class A2g2TrackingEnv(DirectRLEnv):
         joint_err = (data.joint_pos - ref["dof_pos"]).abs().mean(dim=-1)
         forces = self._contact_sensor.data.net_forces_w_history[:, :, self._base_id_sensor]
         base_contact = (forces.norm(dim=-1).max(dim=1)[0] > self.cfg.contact_force_threshold).any(dim=1)
+        if not self.cfg.term_base_contact:
+            base_contact = torch.zeros_like(base_contact)
 
         self._term_causes = {
             "root_pos": pos_err > self.cfg.term_root_pos_err,
@@ -347,6 +379,10 @@ class A2g2TrackingEnv(DirectRLEnv):
             self._ref_t[env_ids] = 0.0
         else:
             clip_idx, t0 = self._motion_lib.sample(len(env_ids))
+            if self._replay_clip_idx is not None:
+                # pinned clip (play.py --motion): resample t0 within its duration
+                clip_idx = torch.full_like(clip_idx, self._replay_clip_idx)
+                t0 = torch.rand_like(t0) * self._motion_lib.durations[self._replay_clip_idx]
             self._clip_idx[env_ids] = clip_idx
             self._ref_t[env_ids] = 0.0 if self.cfg.rsi_start_at_zero else t0
 
