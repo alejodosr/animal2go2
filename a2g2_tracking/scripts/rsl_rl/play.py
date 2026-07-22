@@ -55,6 +55,12 @@ parser.add_argument(
     help="Record a side-by-side comparison video: reference ghost (left) | policy (right). Implies --ghost.",
 )
 parser.add_argument(
+    "--no_pip",
+    action="store_true",
+    default=False,
+    help="Opt out of the pip side-by-side that --video records by default (follow-cam video only).",
+)
+parser.add_argument(
     "--ghost_y_offset",
     type=float,
     default=None,
@@ -65,6 +71,12 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Disable ALL early terminations (drift bounds and falls) to watch free-running behavior to clip end.",
+)
+parser.add_argument(
+    "--early_term",
+    action="store_true",
+    default=False,
+    help="Re-enable early terminations when recording video (videos default to no-reset filming).",
 )
 parser.add_argument(
     "--start_at_zero",
@@ -78,6 +90,13 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+# video defaults (user policy, 2026-07-20): recordings are pip side-by-side
+# and film without resets — a fall/drift plays out on camera instead of
+# teleporting the robot. --no_pip / --early_term opt back out.
+if args_cli.video and not args_cli.no_pip:
+    args_cli.pip_video = True
+if (args_cli.video or args_cli.pip_video) and not args_cli.early_term:
+    args_cli.no_early_term = True
 # always enable cameras to record video
 if args_cli.video or args_cli.pip_video:
     args_cli.enable_cameras = True

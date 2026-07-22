@@ -127,11 +127,47 @@ class A2g2TrackingEnv(DirectRLEnv):
                 activate_contact_sensors=False,
                 rigid_props=ghost_cfg.spawn.rigid_props.replace(disable_gravity=True),
                 collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+                # OPAQUE: de-instancing (below) makes this override live, and
+                # a 0.35-opacity surface over the dark floor renders as
+                # nothing but a drop shadow. Solid blue = visible reference.
                 visual_material_path="ghost_material",
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.5, 1.0), opacity=0.35),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.35, 0.55, 1.0), opacity=1.0),
             )
             self._ghost = Articulation(ghost_cfg)
             self.scene.articulations["ghost"] = self._ghost
+            # The Go2 USD is instanceable, so the collision_props override
+            # above never reaches the colliders inside the instanced
+            # references (the RESULTS.md "solid ghost" gotcha). De-instance
+            # the ghost subtree to make its prims authorable, then force
+            # every collider off — the ghost must never push the robot.
+            import omni.usd
+            from pxr import Usd, UsdPhysics
+
+            stage = omni.usd.get_context().get_stage()
+            ghost_prim = stage.GetPrimAtPath("/World/envs/env_0/Ghost")
+            while True:  # nested instances become real one level at a time
+                instanced = [p for p in Usd.PrimRange(ghost_prim) if p.IsInstance()]
+                if not instanced:
+                    break
+                for p in instanced:
+                    p.SetInstanceable(False)
+            for p in Usd.PrimRange(ghost_prim):
+                if p.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr().Set(False)
+            # Rebind the ghost material to every mesh, stronger than the
+            # bindings the de-instanced prototypes brought along — otherwise
+            # per-mesh prototype materials win and the ghost renders with
+            # missing/dark meshes.
+            from pxr import UsdGeom, UsdShade
+
+            mat_prim = stage.GetPrimAtPath("/World/envs/env_0/Ghost/ghost_material")
+            if mat_prim.IsValid():
+                mat = UsdShade.Material(mat_prim)
+                for p in Usd.PrimRange(ghost_prim):
+                    if p.IsA(UsdGeom.Gprim):
+                        UsdShade.MaterialBindingAPI.Apply(p).Bind(
+                            mat, bindingStrength=UsdShade.Tokens.strongerThanDescendants
+                        )
         self._pip_cams = {}
         if self.cfg.pip_camera:
             if self._ghost is None:

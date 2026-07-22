@@ -24,7 +24,8 @@ One row per run; one change per run (brief §4). Eval numbers from `eval.py`
 | `2026-07-18_17-45-50_stage4_acyclic_trot` | clips acyclic (episode = clip, end = truncation; root cause #2 fix) + injective acyclic phase encoding | 2000 (stopped: plateau from ~1300) | ~92 | 210 (cap ≈228) | 0.0905 | **survival 98.2%** (504/513 reach clip end; 9 `root_pos` deaths, all in the fast-trot final phase) | ✓✓ **STAGE-1 ACCEPTANCE MET**: joint err 0.09 < 0.15 AND survival ≫ 90%. `root_ori` deaths: 512→0. Video (one full episode, frame 0 → truncation): `videos/play/rl-video-step-0.mp4` |
 | `2026-07-18_19-36-23_stage5_phasefree_trot` | phase-free tracker: phase obs removed, preview extended to steps [1,2,15,50] (20 ms–1 s, Peng-style); contract 82→116 actor / 124 critic | 2000 (stopped: plateau from ~1400) | ~93 | 212 | **0.0802** | survival 92.6% (474/512; 38 `root_pos` deaths, phase 0.8–1.0) | ✓ **parity: acceptance still met** (0.08 < 0.15, 92.6% > 90%) with *better* tracking; survival −5.6 pts vs stage4 — drift deaths in the fast section 9→38 (xy err 0.113→0.131). The phase-free contract is validated; the fast-section drift leak is the open item |
 | `2026-07-18_20-36-50_stage6_multiclip_walktrot` | + walk clip (2-clip RSI, one policy, no clip ID — preview-only conditioning) | 3000 (still improving at 2200, ran full) | ~140* | ~230 | walk **0.0286** / trot 0.1085 | walk **95.4%** / trot **99.4%** | ✓✓ **STAGE-2 ACCEPTANCE MET** — both clips pass both bars from one policy. Interference trade: trot tracking −35% vs single-clip best (0.080→0.109) yet trot survival UP (92.6→99.4%; walk co-training regularizes). Walk deaths: 22 root_pos in its fast lead-out (phase 0.8–1.0). Per-clip videos in `videos/play/` (*2-clip reward, not comparable) |
-| `2026-07-19_stage7_multiclip_all` (run dir dated 2026-07-18) | + canter clip (3-clip RSI, 4000 iters per user) | 4000 | — | — | walk 0.0306 / trot **0.0892** / canter 0.0900 | walk 95.8% / trot **99.5%** / **canter 47.9%** | ✓✓✗ walk+trot HOLD (trot tracking improved 0.109→0.089 with more data); canter joint err under the bar but survival fails — deaths cluster at phase 0.1–0.2 (the 4.1 m/s, 100%-flight gallop burst, ref dof_vel 66 rad/s = 2.2× actuator limit — infeasible) and 0.8–1.0 (sustained 2–2.5 m/s return canter). Per the brief: acceptable failure, article content. 3 per-clip videos in `videos/play/` |
+| `2026-07-19_stage7_multiclip_all` (run dir dated 2026-07-18) | + canter clip (3-clip RSI, 4000 iters per user) | 4000 | — | — | walk 0.0306 / trot **0.0892** / canter 0.0900 | walk 95.8% / trot **99.5%** / **canter 47.9%** | ✓✓✗ walk+trot HOLD (trot tracking improved 0.109→0.089 with more data); canter joint err under the bar but survival fails — deaths cluster at phase 0.1–0.2 (the 4.1 m/s, 100%-flight gallop burst, ref dof_vel 66 rad/s = 2.2× actuator limit — infeasible) and 0.8–1.0 (sustained 2–2.5 m/s return canter). Per the brief: acceptable failure, article content. 3 per-clip videos in `videos/play/`. **2026-07-20 audit revised this diagnosis — see "Canter feasibility audit" below** |
+| `2026-07-20_14-50-16_stage8_canter_datafix` | canter **data fix only** (no env/reward change): despiked `dof_pos` (BVLS velocity clamp at 40 rad/s — trot's raw peak; 3 joints, ≤5 frames each, max 0.29 rad) + contacts relabeled from retargeted foot height (world z < 0.030 m + 1-frame morph cleanup; fraction 0.13→0.30), feet cache regenerated. Original pkl: `motions_quarantine/D1_010_KAN01_004.orig.pkl` | 4000 | 109.5 | 189 | walk 0.0291 / trot 0.0870 / canter 0.0993 | walk **96.8%** / trot 98.9% / **canter 55.4%** | ✓✓✗ walk best-ever tracking+survival, trot holds; **canter +7.5 pts survival from the data fix alone** (joint err 0.090→0.099, still under bar). Deaths now cleanly bimodal: 34/79 at phase 0.1–0.2 (the 4.5 m/s hind-leg-only gallop burst — the audit's genuine-physics residue) and 31/79 at 0.8–1.0 (fast return canter). Verdict: ~⅓ of the stage7 deficit was the data defect; the rest is the infeasible burst → trim (frames ~90–300) remains the honest lever if canter must pass |
 
 ## Peng 2020 comparison (2026-07-18)
 
@@ -233,3 +234,76 @@ NOT in the batch: γ, preview horizon, termination redesign, velocity_limit.
   (train/eval spawn no ghost — metrics unaffected). Refilmed with
   `env.ghost_y_offset=4.0`; rule of thumb: offset > the clip's lateral
   path spread.
+- **Gotcha KILLED (2026-07-20)**: the ghost is now truly collision-free.
+  `_setup_scene` de-instances the ghost subtree (`SetInstanceable(False)`,
+  looped for nesting) so the prims become authorable, then sets
+  `collisionEnabled=False` on every `CollisionAPI` prim. Verified: 0/27
+  ghost colliders enabled (robot 27/27 intact), and a ghost parked
+  *directly on* the robot produces 2.7 mm displacement in 0.1 s (the old
+  bug ejected instantly at reset). The lateral offset is now cosmetic
+  (camera framing), not a physics requirement; no-reset filming can't be
+  destabilized by ghost contact regardless of where the robot wanders.
+  Third bite of the same gotcha, hiding inside the fix: de-instancing
+  made the spawn-time transparent material (opacity 0.35) live for the
+  first time — the ghost body stopped rendering and only its drop shadow
+  showed on video. Resolution: ghost material is now OPAQUE solid blue
+  (opacity 1.0) and explicitly rebound to every mesh with
+  `strongerThanDescendants` after de-instancing (prototype-local
+  bindings otherwise win and leave meshes dark). Ghost = blue, policy
+  robot = white. In doubling-back clips the white robot may pass
+  *through* the blue ghost on video — harmless now, by construction.
+
+## Canter feasibility audit (2026-07-20) — revises the stage7 diagnosis
+
+Policy-independent audit of `D1_010_KAN01_004` (finite-diff kinematics of
+the raw pkl vs. Go2 limits, walk/trot as feasible controls). Three findings:
+
+1. **The "66 rad/s = 2.2× actuator limit" was a retarget artifact**, not a
+   physical demand: a single-frame 1.33 rad discontinuity (FR thigh,
+   1.63→0.30 rad in 20 ms, frame ~63). 3-frame-smoothed true demand is
+   36.6 rad/s = 1.2× limit — marginal, not absurd (trot's raw peak is
+   40.8 rad/s and tracks at 99.5% survival).
+2. **Contact labels were broken and fed the reward.** Labels come from the
+   *source dog's toes* with a horizontal-speed threshold (retarget.py),
+   which fails at gallop speed: 13% contact fraction vs 52/55% for
+   walk/trot (real canter duty ≈ 30–40%). The burst was labeled 100%
+   airborne for 1.2 s while retargeted feet sat at ground height (70
+   foot-frames < 2.8 cm labeled airborne); root az ≈ −0.3 m/s² during this
+   "flight" (levitation; trot's real flights show a proper ballistic
+   −7…−8). `contact_match` (w=0.1) therefore *rewarded avoiding stance*
+   through the burst and much of the return canter — plausibly part of the
+   47.9% survival, including the 2–2.5 m/s return-canter deaths.
+3. **What is genuinely infeasible: the speed, and front support.** 4.5 m/s
+   peak (30 rad/s joints + ~0.35 m legs → practical tracking ceiling
+   ~3–3.5 m/s), and the retarget leaves front feet high through the burst
+   (FR/FL contact 13/20% vs RR/RL 43/43%) — the reference effectively asks
+   for a hind-leg bound at 4.5 m/s.
+
+**From-zero eval (2026-07-20, stage8 checkpoint,
+`eval_results_fromzero.md`)**: same clean protocol but
+`env.rsi_start_at_zero=true` — every episode must track its whole clip
+from frame 0. Results: **walk 0%** (deterministic `root_pos` exit at
+phase 0.65–0.8, accumulated xy drift 0.26 m), **trot 50%** (knife-edge:
+51 `root_ori` / 51 time_out — per-env PhysX nondeterminism splits an
+otherwise deterministic trajectory), **canter 0%** (deterministic
+`root_pos` exit at ~step 22 ≈ phase 0.07, the burst's onset). Lesson:
+the headline survival numbers are **phase-averaged** (uniform-RSI starts,
+the protocol of every row above) and are much more forgiving than
+continuous from-zero tracking — most eval episodes start mid-clip and
+face only a suffix of the hazards, and short horizons accumulate less xy
+drift. Both metrics are honest; they answer different questions
+("recover-and-track from anywhere" vs "reproduce the whole clip"). A
+from-zero video therefore shows the envelope exit essentially every
+time, at the same spot, regardless of the 55%/97% numbers.
+
+Fix applied for stage8 (data only, minimal deformation): BVLS velocity
+clamp at 40 rad/s on `dof_pos` (only 3 joints changed, ≤5 frames each,
+max 0.29 rad, mean 0.00035 rad); contacts relabeled from retargeted foot
+world height (z < 0.030 m; stance rest is 0.0239, old labels' z p95 was
+0.028) + 1-frame morphological cleanup; feet cache regenerated via
+kinematic replay. After fix: airborne fraction 59.7%→21.7% (trot-like),
+longest flight 1220→240 ms, peak dof_vel 40.0 rad/s. Audit/fix scripts:
+session scratchpad (`feasibility.py`, `fix_canter_despike.py`,
+`relabel_contacts.py`); original pkl backed up to
+`motions_quarantine/D1_010_KAN01_004.orig.pkl`. Walk/trot labels look
+sane and were left untouched.

@@ -17,12 +17,24 @@ source-side contacts) and produces clean joint trajectories:
      swing frames to avoid pops.
   5. IK + limit report: solve, clamp to the MJCF limits, report the clamp
      rate (a high rate means the scaling/offsets upstream are wrong).
+  6. Contact relabel from the ROBOT's realized (post-IK) foot heights, then
+     re-pin + re-IK with the corrected labels. The source-side detector's
+     horizontal-speed gate fails at fast gaits (canter D1_010_KAN01_004:
+     13% stance vs a real ~30-40%, the whole gallop burst labeled airborne
+     while retargeted feet sat at ground height) — and those labels feed
+     both the stance pinning here and the contact_match reward downstream.
+  7. Despike: minimal-deformation velocity clamp on the final dof_pos. IK
+     branch flips can jump a joint in a single frame (same clip: 1.33 rad
+     in 20 ms = 66 rad/s); target smoothing (step 2) runs *before* IK, so
+     nothing else catches them.
 
 Order matters: smooth first (a filter would smear the pins), then align,
-then pin, then IK.
+then pin, then IK; relabel needs realized feet, so it triggers one more
+pin + IK pass; despike runs last, on the joint trajectory the tracker sees.
 """
 
 import numpy as np
+from scipy.optimize import lsq_linear
 from scipy.signal import butter, filtfilt
 from scipy.spatial.transform import Rotation
 
@@ -32,6 +44,15 @@ FOOT_RADIUS = 0.022        # foot sphere size in the MJCF: center z at contact
 CUTOFF_HZ = 7.0            # Butterworth low-pass cutoff (brief: ~6-8 Hz)
 MIN_SEGMENT_S = 0.05       # stance/swing runs shorter than this are flicker
 BLEND_S = 0.05             # skate-removal blend in/out duration (~3 frames @ 60)
+# Realized-foot contact threshold: stance foot centers sit at FOOT_RADIUS
+# (0.022) after pinning; the Isaac replay of accepted clips puts labeled
+# stances at z <= 0.028 (2026-07-20 audit), so 0.030 splits cleanly.
+CONTACT_RELABEL_Z = 0.030
+# Reference joint-velocity clamp (rad/s). Not the actuator limit (30): the
+# trot clip peaks at 40.8 rad/s raw yet tracks at 99.5% survival, so 40 is
+# an empirically trackable *reference* demand; anything above it here has
+# been an IK artifact, not motion.
+DOF_VEL_CLAMP = 40.0
 
 
 def foot_world_positions(root_pos, root_rot, foot_base):
@@ -128,6 +149,40 @@ def pin_stance_feet(foot_world, contacts, blend):
     return out
 
 
+def relabel_contacts(foot_realized, min_len):
+    """Stance mask from the robot's realized foot heights (world frame).
+
+    Height-only on purpose: the sim contact sensor fires on any touch, so
+    a label derived from where the retargeted feet actually are matches
+    what the sensor will report — unlike the source-side speed gate, which
+    erases fast-gait stances (see module docstring, step 6).
+    """
+    return refine_contacts(foot_realized[..., 2] < CONTACT_RELABEL_Z, min_len)
+
+
+def despike_dof(dof_pos, fps, vmax=DOF_VEL_CLAMP):
+    """Clamp per-frame joint velocity to vmax with minimal deformation.
+
+    Per joint, solves min ||q - q_ref||^2 s.t. |q[t+1] - q[t]| <= vmax/fps
+    (BVLS on the frame-to-frame steps), so a spike is spread over adjacent
+    frames while joints already under the clamp are returned bit-identical.
+    """
+    dt_max = vmax / fps
+    out = dof_pos.copy()
+    steps = np.diff(dof_pos, axis=0)
+    lower = None
+    for j in np.flatnonzero(np.abs(steps).max(axis=0) > dt_max):
+        if lower is None:
+            n = len(dof_pos) - 1
+            lower = np.tril(np.ones((n, n)))
+        res = lsq_linear(
+            lower, dof_pos[1:, j] - dof_pos[0, j],
+            bounds=(-dt_max, dt_max), method="bvls",
+        )
+        out[1:, j] = dof_pos[0, j] + np.cumsum(res.x)
+    return out
+
+
 def skate_speed(foot_world, contacts, fps):
     """Mean horizontal speed (m/s) of feet during stance — 0 means no skate.
 
@@ -155,29 +210,43 @@ def postprocess(motion, foot_targets_base):
     rot = Rotation.from_quat(motion["root_rot"])
     foot_world = foot_world_positions(motion["root_pos"], rot, foot_targets_base)
 
-    contacts = refine_contacts(
-        motion["foot_contacts"], max(2, round(MIN_SEGMENT_S * fps))
-    )
-    skate_before = skate_speed(foot_world, contacts, fps)
+    min_len = max(2, round(MIN_SEGMENT_S * fps))
+    blend = max(2, round(BLEND_S * fps))
+    contacts_src = refine_contacts(motion["foot_contacts"], min_len)
+    skate_before = skate_speed(foot_world, contacts_src, fps)
 
     foot_world = lowpass(foot_world, fps)
     root_pos = lowpass(motion["root_pos"], fps)
     rot = smooth_rotations(rot, fps)
 
-    root_pos, foot_world, ground_offset = ground_align(root_pos, foot_world, contacts)
-    foot_world = pin_stance_feet(foot_world, contacts, max(2, round(BLEND_S * fps)))
-    foot_world[..., 2] = np.maximum(foot_world[..., 2], FOOT_RADIUS)  # no swing dips
-
-    dof_pos, violated = ik.clamp_to_limits(
-        ik.ik(foot_base_positions(root_pos, rot, foot_world))
+    root_pos, foot_world, ground_offset = ground_align(
+        root_pos, foot_world, contacts_src
     )
-    foot_realized = foot_world_positions(root_pos, rot, ik.fk(dof_pos))
+
+    def solve(contacts):
+        pinned = pin_stance_feet(foot_world, contacts, blend)
+        pinned[..., 2] = np.maximum(pinned[..., 2], FOOT_RADIUS)  # no swing dips
+        dof_pos, violated = ik.clamp_to_limits(
+            ik.ik(foot_base_positions(root_pos, rot, pinned))
+        )
+        return dof_pos, violated
+
+    dof_pos, violated = solve(contacts_src)
+    contacts = relabel_contacts(
+        foot_world_positions(root_pos, rot, ik.fk(dof_pos)), min_len
+    )
+    if (contacts != contacts_src).any():  # corrected labels change the pins
+        dof_pos, violated = solve(contacts)
+
+    dof_vel_peak_raw = np.abs(np.diff(dof_pos, axis=0)).max() * fps
+    despiked = despike_dof(dof_pos, fps)
+    foot_realized = foot_world_positions(root_pos, rot, ik.fk(despiked))
     skate_after = skate_speed(foot_realized, contacts, fps)
 
     out = dict(motion)
     out["root_pos"] = root_pos
     out["root_rot"] = rot.as_quat()
-    out["dof_pos"] = dof_pos
+    out["dof_pos"] = despiked
     out["foot_contacts"] = contacts
     report = {
         "clamp_rate": violated.mean(),
@@ -185,6 +254,12 @@ def postprocess(motion, foot_targets_base):
         "ground_offset": ground_offset,
         "skate_before": skate_before,
         "skate_after": skate_after,
+        "contact_fraction_src": contacts_src.mean(),
+        "contact_fraction": contacts.mean(),
+        "contact_changed": (contacts != contacts_src).mean(),
+        "dof_vel_peak_raw": dof_vel_peak_raw,
+        "dof_vel_peak": np.abs(np.diff(despiked, axis=0)).max() * fps,
+        "despike_max_dq": np.abs(despiked - dof_pos).max(),
     }
     return out, report
 

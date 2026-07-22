@@ -125,6 +125,47 @@ def test_pin_stance_feet_blend_respects_neighbor_stance():
     np.testing.assert_allclose(pinned[14:22, 1] - pinned[14, 1], 0.0)
 
 
+def test_relabel_contacts_from_realized_height():
+    """Low feet become stance regardless of speed; high feet stay swing."""
+    n = 30
+    feet = np.full((n, 4, 3), 0.10)
+    feet[:, 0, 2] = pp.FOOT_RADIUS       # FR on the ground the whole clip
+    feet[10:20, 1, 2] = 0.025            # FL touches for 10 frames
+    relabeled = pp.relabel_contacts(feet, min_len=3)
+    assert relabeled[:, 0].all()
+    np.testing.assert_array_equal(relabeled[10:20, 1], True)
+    assert not relabeled[:10, 1].any() and not relabeled[20:, 1].any()
+    assert not relabeled[:, 2:].any()
+
+
+def test_relabel_contacts_drops_flicker():
+    feet = np.full((30, 4, 3), 0.10)
+    feet[15, 2, 2] = 0.01                # 1-frame ground graze: not a stance
+    assert not pp.relabel_contacts(feet, min_len=3).any()
+
+
+def test_despike_dof_spreads_spike_minimally():
+    fps, n = 50.0, 60
+    q = np.zeros((n, 12))
+    q[:, 3] = np.sin(np.arange(n) / fps * 2 * np.pi)      # feasible joint
+    q[30:, 5] = 1.2                                       # 1-frame step: 60 rad/s
+    out = pp.despike_dof(q, fps, vmax=40.0)
+    vel = np.abs(np.diff(out, axis=0)) * fps
+    assert vel.max() <= 40.0 + 1e-6
+    # untouched joints come back bit-identical
+    np.testing.assert_array_equal(out[:, 3], q[:, 3])
+    # deformation is local and small: same endpoints, tiny total change
+    np.testing.assert_allclose(out[0, 5], q[0, 5], atol=1e-9)
+    np.testing.assert_allclose(out[-1, 5], q[-1, 5], atol=1e-6)
+    assert np.abs(out[:, 5] - q[:, 5]).max() < 0.4
+    assert (np.abs(out[:, 5] - q[:, 5]) > 1e-6).sum() <= 3
+
+
+def test_despike_dof_noop_below_clamp():
+    q = RNG.normal(scale=0.01, size=(40, 12)).cumsum(axis=0)
+    np.testing.assert_array_equal(pp.despike_dof(q, fps=50.0), q)
+
+
 def test_postprocess_end_to_end():
     """Synthetic stepping motion: post-processing kills skate, keeps limits."""
     n, fps = 120, 60.0

@@ -14,10 +14,13 @@ correspond joint-by-joint):
   4. Analytic IK per leg (retarget/ik.py), clamped to joint limits with the
      clamp rate reported.
 
-Foot contacts are detected on the *source* toes (height + horizontal-speed
-thresholds); post-processing (retarget/postprocess.py: contact refinement,
-smoothing, ground alignment, foot-skate removal) then runs by default —
-pass --raw to see the phase-3 output with its skate and jitter.
+Foot contacts are *initially* detected on the source toes (height +
+horizontal-speed thresholds) — good enough to seed ground alignment, but
+the speed gate erases fast-gait stances, so post-processing
+(retarget/postprocess.py: contact refinement, smoothing, ground alignment,
+foot-skate removal, then contact relabel from the robot's realized feet
+and a dof-velocity despike) replaces them and runs by default — pass
+--raw to see the phase-3 output with its skate and jitter.
 
 Usage:
     python retarget/retarget.py data/processed/D1_007_KAN01_001.npz
@@ -208,6 +211,12 @@ def main():
             print(f"  post-process: stance-foot skate "
                   f"{report['skate_before']:.3f} -> {report['skate_after']:.3f} m/s, "
                   f"ground offset {1000 * report['ground_offset']:+.0f} mm")
+            print(f"  feasibility: contacts {report['contact_fraction_src']:.2f} -> "
+                  f"{report['contact_fraction']:.2f} (relabeled from realized feet, "
+                  f"{100 * report['contact_changed']:.1f}% foot-frames changed), "
+                  f"dof-vel peak {report['dof_vel_peak_raw']:.0f} -> "
+                  f"{report['dof_vel_peak']:.0f} rad/s "
+                  f"(despike max dq {report['despike_max_dq']:.3f} rad)")
         if info["clamp_rate"] > 0.03:
             per_joint = info["violated"].mean(axis=0)
             worst = np.argsort(per_joint)[::-1][:3]
