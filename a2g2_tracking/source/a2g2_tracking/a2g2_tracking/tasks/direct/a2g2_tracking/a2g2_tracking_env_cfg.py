@@ -38,6 +38,9 @@ MOTIONS_DIR = Path(os.environ.get("A2G2_MOTIONS_DIR", _REPO_ROOT / "motions"))
 WALK_CLIP = "D1_007_KAN01_001"
 TROT_CLIP = "D1_009_KAN01_002"
 CANTER_CLIP = "D1_010_KAN01_004"
+# stage10 additions (2026-07-22): non-gait behaviors.
+JUMP_CLIP = "D1_ex04_KAN02_003"
+SIT_CLIP = "D1_ex03_KAN02_013"  # sit + foot lift, 76 s
 
 
 @configclass
@@ -78,7 +81,9 @@ class EventCfg:
 class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     # env — 50 Hz control over 200 Hz physics (one reference frame per step)
     decimation = 4
-    episode_length_s = 10.0
+    # must cover the longest acyclic clip (sit, 76.3 s); other clips truncate
+    # at their own end well before this cap (stage10; was 10.0)
+    episode_length_s = 80.0
     action_scale = 0.25
     # PD-target centering: "ref" = ref_dof_pos(t+1) + scale·a (Peng 2020-style,
     # |a|≈1 covers corrections; zero action holds the reference — stage2) vs
@@ -157,8 +162,14 @@ class A2g2TrackingEnvCfg(DirectRLEnvCfg):
     # canter contains a 167° turn), so the cyclic wrap seam teleports the
     # reference and killed 511/512 stage3 episodes (RESULTS.md root cause #2).
     # Episode = the clip; clip end is a truncation (bootstrapped), not a death.
-    motion_files: list = [f"{name}.pkl" for name in (WALK_CLIP, TROT_CLIP, CANTER_CLIP)]
-    motion_cyclic: list = [False, False, False]
+    motion_files: list = [
+        f"{name}.pkl" for name in (WALK_CLIP, TROT_CLIP, CANTER_CLIP, JUMP_CLIP, SIT_CLIP)
+    ]
+    motion_cyclic: list = [False, False, False, False, False]
+    # equal expected env-step share per clip (clip ~ 1/duration, then uniform
+    # frame) — without it the 76 s sit clip would own ~93% of training steps
+    # (duration² weighting: most starts AND longest episodes). See MotionLib.
+    rsi_equal_clip_steps = True
 
     # reference state initialization noise
     rsi_joint_pos_noise = 0.05  # rad, uniform ±

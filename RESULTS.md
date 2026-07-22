@@ -25,6 +25,8 @@ One row per run; one change per run (brief §4). Eval numbers from `eval.py`
 | `2026-07-18_19-36-23_stage5_phasefree_trot` | phase-free tracker: phase obs removed, preview extended to steps [1,2,15,50] (20 ms–1 s, Peng-style); contract 82→116 actor / 124 critic | 2000 (stopped: plateau from ~1400) | ~93 | 212 | **0.0802** | survival 92.6% (474/512; 38 `root_pos` deaths, phase 0.8–1.0) | ✓ **parity: acceptance still met** (0.08 < 0.15, 92.6% > 90%) with *better* tracking; survival −5.6 pts vs stage4 — drift deaths in the fast section 9→38 (xy err 0.113→0.131). The phase-free contract is validated; the fast-section drift leak is the open item |
 | `2026-07-18_20-36-50_stage6_multiclip_walktrot` | + walk clip (2-clip RSI, one policy, no clip ID — preview-only conditioning) | 3000 (still improving at 2200, ran full) | ~140* | ~230 | walk **0.0286** / trot 0.1085 | walk **95.4%** / trot **99.4%** | ✓✓ **STAGE-2 ACCEPTANCE MET** — both clips pass both bars from one policy. Interference trade: trot tracking −35% vs single-clip best (0.080→0.109) yet trot survival UP (92.6→99.4%; walk co-training regularizes). Walk deaths: 22 root_pos in its fast lead-out (phase 0.8–1.0). Per-clip videos in `videos/play/` (*2-clip reward, not comparable) |
 | `2026-07-19_stage7_multiclip_all` (run dir dated 2026-07-18) | + canter clip (3-clip RSI, 4000 iters per user) | 4000 | — | — | walk 0.0306 / trot **0.0892** / canter 0.0900 | walk 95.8% / trot **99.5%** / **canter 47.9%** | ✓✓✗ walk+trot HOLD (trot tracking improved 0.109→0.089 with more data); canter joint err under the bar but survival fails — deaths cluster at phase 0.1–0.2 (the 4.1 m/s, 100%-flight gallop burst, ref dof_vel 66 rad/s = 2.2× actuator limit — infeasible) and 0.8–1.0 (sustained 2–2.5 m/s return canter). Per the brief: acceptable failure, article content. 3 per-clip videos in `videos/play/`. **2026-07-20 audit revised this diagnosis — see "Canter feasibility audit" below** |
+| `2026-07-22_11-41-22_stage9_canter_timewarp` | canter **speed-aware time warp only** (`retarget/timewarp.py`, feasibility projection v1): planar root speed capped at 3.2 m/s by local playback slowdown — burst plays at ~0.75×, 73% of the clip bit-identical, 300→319 frames (5.98→6.36 s), smoothed peak 4.32→3.29 m/s, dof_vel peak 40→38.6 rad/s. Return canter (2–2.5 m/s) untouched by design. stage8 pkl → `motions_quarantine/D1_010_KAN01_004.stage8.pkl`, feet caches regenerated | 4000 | 112.5 | 199 | walk 0.0303 / trot 0.0823 / canter 0.0931 | walk 95.5% / trot 98.8% / **canter 61.2%** | ✓✓✗ walk/trot hold; **canter +5.8 pts from the warp** (55.4→61.2). Deaths 73: burst region (warped phase 0.1–0.4) still 43 — root_pos exits, i.e. the robot *survives* the slowed burst but can't hold xy tracking through it (front-support defect: front feet held high, 13/20% contact); return canter 21. From-zero: exit still deterministic in the burst but ~2× deeper (step 42 vs stage8's 22); trot from-zero 50%→98.9% (was knife-edge). Verdict: speed was real but secondary — **front-support repair is the next data lever** |
+| `2026-07-22_14-25-32_stage10_5clip_jumpsit` | +2 clips: jump `D1_ex04_KAN02_003` (8.3 s) + sit/foot-up `D1_ex03_KAN02_013` (76.3 s), both sanitized (relabel+despike; jump contacts 0.25→0.42, dof_vel 84→40; originals in `motions_quarantine/*.orig.pkl`; timewarp no-op — planar 2.1/1.1 m/s). Infra batch: timewarp = postprocess step 8; **MotionLib `equal_clip_steps`** (clip ∼ 1/duration → equal env-step share; else sit eats ~93%); `episode_length_s` 10→80; feet caches ×5; 6000 iters | 6000 | 112.6 | 199 | walk 0.0344 / trot 0.0939 / canter 0.0677 / jump 0.0563 / sit 0.0602* | walk 98.9% / trot 97.9% / **canter 69.3%** / **jump 99.3%** / sit 56.2%* | ✓✓✓✓~ **everything improved**: canter +8.1 pts over stage9 (and tracking 0.093→0.068 best-ever), jump passes both bars outright. From-zero: walk 0→**92.5%**, trot **100%**, jump 49.6%, **sit 100%** (512/512 track all 76 s: sit-down→hold→foot-up→stand-up), canter 0% but exit deepened step 42→~198 (through the burst, now dies in the return section). *sit numbers from dedicated `eval_results_sit_only.md` — the shared eval's 512-episode cap starves long clips (4 eps only, all cold-spawn deaths); its 56.2% phase-averaged deficit = RSI cold-spawns INTO the deep sit (48–58° ref tilt, z 0.08 m; root_ori + 9 base_contact at phase 0.5–0.9), not the behavior. Residual levers: canter front-support repair; jump from-zero knife-edge; spawn-into-sit fragility |
 | `2026-07-20_14-50-16_stage8_canter_datafix` | canter **data fix only** (no env/reward change): despiked `dof_pos` (BVLS velocity clamp at 40 rad/s — trot's raw peak; 3 joints, ≤5 frames each, max 0.29 rad) + contacts relabeled from retargeted foot height (world z < 0.030 m + 1-frame morph cleanup; fraction 0.13→0.30), feet cache regenerated. Original pkl: `motions_quarantine/D1_010_KAN01_004.orig.pkl` | 4000 | 109.5 | 189 | walk 0.0291 / trot 0.0870 / canter 0.0993 | walk **96.8%** / trot 98.9% / **canter 55.4%** | ✓✓✗ walk best-ever tracking+survival, trot holds; **canter +7.5 pts survival from the data fix alone** (joint err 0.090→0.099, still under bar). Deaths now cleanly bimodal: 34/79 at phase 0.1–0.2 (the 4.5 m/s hind-leg-only gallop burst — the audit's genuine-physics residue) and 31/79 at 0.8–1.0 (fast return canter). Verdict: ~⅓ of the stage7 deficit was the data defect; the rest is the infeasible burst → trim (frames ~90–300) remains the honest lever if canter must pass |
 
 ## Peng 2020 comparison (2026-07-18)
@@ -252,6 +254,51 @@ NOT in the batch: γ, preview horizon, termination redesign, velocity_limit.
   bindings otherwise win and leave meshes dark). Ghost = blue, policy
   robot = white. In doubling-back clips the white robot may pass
   *through* the blue ghost on video — harmless now, by construction.
+
+## Stage10 video review + jump forensics (2026-07-22)
+
+User review of the 15 from-zero takes: canter visually much closer to the
+reference, drift negligible on camera; sit/walk/trot/jump all look good —
+except the jump never fully leaves the ground. Forensics on the (sanitized)
+jump pkl explain it. **Measured facts** (finite-diff on the pkl):
+
+- The clip has two unlike "flight" segments. Frames 38–50 (phase 0.09,
+  240 ms): apex +0.15 m, mean root az **−7.1 m/s²** — near-ballistic, a
+  genuine and feasible jump (takeoff vz 1.43 m/s ≤ what 40 rad/s legs can
+  produce). Frames 98–185 (phase 0.24–0.45, **1740 ms**): root z holds
+  ≈ 0.43 m with all four feet labeled airborne and mean az **−0.65 m/s²**
+  — physically impossible sustained hover (same artifact class as the
+  canter "levitation", 7× longer). A third 40 ms micro-flight at phase
+  0.95. `contact_match` (w = 0.1) therefore rewards being airborne for the
+  full 1.7 s hover. Despike touched frames 45–85 and 402–410 (takeoff/
+  landing IK spikes; max 0.46 rad).
+- Policy behavior (videos + eval): grounded approximation of the whole
+  sequence, 99.3% phase-averaged survival, joint err 0.056.
+
+**Hypotheses** (plausible, not verified against the source): the source
+dog jumped **onto a raised object** (~0.10–0.15 m), stood on it, and
+hopped off — the flat-ground retarget puts its feet above the 3 cm contact
+threshold, producing the hover. The policy's refusal to commit to flight
+is then rational: the hover is unsatisfiable, and the real 240 ms leap
+risks landing terminations for marginal reward. Verification would need
+the source video/BVH (foot heights during the segment).
+
+**Canter improvement attribution (stage9 → stage10, +8.1 pts)**. Fact:
+the sampler change barely moved canter's training share — duration-
+weighted (stage9, 3 clips) already gave it ≈ 18% of env-steps vs 20%
+under equal_clip_steps. So "better RSI sampling" is NOT the explanation.
+Hypotheses for the actual drivers: (a) 6000 vs 4000 iters (≈ 1.6× canter
+samples in absolute terms); (b) **jump co-training** — the burst is a
+hind-leg bound and the jump clip trains exactly hind-driven explosive
+extension + landing recovery; (c) sit co-training (balance at extreme
+tilt). Same cross-behavior regularization pattern as walk→trot in stage6;
+not isolated per-factor.
+
+Pipeline lesson (for the video→robot feasibility layer): add a
+**ballistic consistency check** — sustained all-airborne segments with
+az ≉ −g indicate hidden terrain or retarget artifacts; flag or re-ground
+before training. The timewarp (root-speed cap) cannot catch these:
+vertical/support infeasibility is invisible to a planar speed test.
 
 ## Canter feasibility audit (2026-07-20) — revises the stage7 diagnosis
 

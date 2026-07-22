@@ -27,10 +27,14 @@ source-side contacts) and produces clean joint trajectories:
      branch flips can jump a joint in a single frame (same clip: 1.33 rad
      in 20 ms = 66 rad/s); target smoothing (step 2) runs *before* IK, so
      nothing else catches them.
+  8. Speed-aware time warp (timewarp.py, feasibility projection v1): planar
+     root speed above the Go2 tracking ceiling is projected out by local
+     playback slowdown instead of trimming. No-op for clips under the cap.
 
 Order matters: smooth first (a filter would smear the pins), then align,
 then pin, then IK; relabel needs realized feet, so it triggers one more
-pin + IK pass; despike runs last, on the joint trajectory the tracker sees.
+pin + IK pass; despike runs on the joint trajectory the tracker sees; the
+warp goes last because it resamples every channel onto a new time grid.
 """
 
 import numpy as np
@@ -248,7 +252,18 @@ def postprocess(motion, foot_targets_base):
     out["root_rot"] = rot.as_quat()
     out["dof_pos"] = despiked
     out["foot_contacts"] = contacts
+
+    from retarget import timewarp  # at call site: timewarp imports our helpers
+
+    out, warp = timewarp.timewarp(out)
     report = {
+        "warp_min_rate": warp["min_rate"],
+        "warp_slowed_fraction": warp["slowed_fraction"],
+        "warp_duration": (warp["duration_before"], warp["duration_after"]),
+        "warp_speed_peak_smooth": (
+            warp["planar_speed_peak_before"][1],
+            warp["planar_speed_peak_after"][1],
+        ),
         "clamp_rate": violated.mean(),
         "violated": violated,
         "ground_offset": ground_offset,

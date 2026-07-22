@@ -28,7 +28,13 @@ class MotionLib:
     # optional per-clip fields, included only when ALL clips provide them
     _OPTIONAL = ("feet_pos_root",)
 
-    def __init__(self, clips: list[MotionClip], cyclic: list[bool], device: str | torch.device = "cpu"):
+    def __init__(
+        self,
+        clips: list[MotionClip],
+        cyclic: list[bool],
+        device: str | torch.device = "cpu",
+        equal_clip_steps: bool = False,
+    ):
         if len(clips) == 0:
             raise ValueError("empty motion library")
         if len(cyclic) != len(clips):
@@ -48,6 +54,20 @@ class MotionLib:
         # playable duration per clip (seconds): cyclic clips own the wrap
         # segment frame N-1 → frame 0, acyclic ones end at their last frame
         self.durations = torch.where(self.cyclic, lengths / self.fps, (lengths - 1) / self.fps)
+
+        # RSI clip weights. Duration-weighted sampling (uniform over (clip,
+        # frame) pairs) lets a long clip dominate twice over: it gets most of
+        # the episode STARTS, and — since an acyclic episode runs start→clip
+        # end, expected length duration/2 — its episodes also LAST longer, so
+        # its share of env-steps is ∝ duration². With clips of similar length
+        # that was benign; a 76 s clip next to 6-10 s clips would eat ~93% of
+        # training. equal_clip_steps picks the clip ∝ 1/duration instead
+        # (then a uniform frame within it), equalizing expected env-step
+        # share per clip: p_c · E[episode len | c] = const.
+        self.clip_probs = (
+            1.0 / self.durations if equal_clip_steps else self.durations
+        )
+        self.clip_probs = self.clip_probs / self.clip_probs.sum()
 
         self._fields = list(self.FIELDS)
         for field in self._OPTIONAL:
@@ -78,24 +98,23 @@ class MotionLib:
         cyclic: list[bool] | None = None,
         device: str | torch.device = "cpu",
         z_offset: float = GROUND_Z_OFFSET,
+        equal_clip_steps: bool = False,
     ) -> "MotionLib":
         """Load pkls and build the lib. ``cyclic`` defaults to all-cyclic
         (our walk/trot/canter clips are gait loops)."""
         clips = [load_motion(p, joint_names, device=device, z_offset=z_offset) for p in paths]
         if cyclic is None:
             cyclic = [True] * len(clips)
-        return cls(clips, cyclic, device=device)
+        return cls(clips, cyclic, device=device, equal_clip_steps=equal_clip_steps)
 
     # -- sampling (reference state initialization) ---------------------------
 
     def sample(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Uniform over (clip, frame) pairs — i.e. duration-weighted over
-        clips — for RSI. Returns (clip_idx (E,) long, t (E,) float seconds)."""
-        u = torch.rand(n, device=self.device) * self.durations.sum()
-        edges = self.durations.cumsum(0)
-        clip_idx = torch.searchsorted(edges, u, right=True).clamp(max=self.num_clips - 1)
-        t_start = edges - self.durations
-        return clip_idx, u - t_start[clip_idx]
+        """RSI start states: clip ~ ``clip_probs`` (see __init__), then a
+        uniform time within the clip. Returns (clip_idx (E,) long, t (E,)
+        float seconds)."""
+        clip_idx = torch.multinomial(self.clip_probs, n, replacement=True)
+        return clip_idx, torch.rand(n, device=self.device) * self.durations[clip_idx]
 
     # -- lookup --------------------------------------------------------------
 

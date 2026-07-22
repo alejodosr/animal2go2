@@ -53,6 +53,7 @@ class A2g2TrackingEnv(DirectRLEnv):
             joint_names=self._robot.joint_names,
             cyclic=list(self.cfg.motion_cyclic),
             device=self.device,
+            equal_clip_steps=self.cfg.rsi_equal_clip_steps,
         )
         needs_feet = self.cfg.rew_ee_w != 0.0 and not (self.cfg.kinematic_replay or self.cfg.pd_replay)
         if needs_feet and "feet_pos_root" not in self._motion_lib._fields:
