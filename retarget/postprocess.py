@@ -32,20 +32,21 @@ source-side contacts) and produces clean joint trajectories:
      the dog stood on a ~0.1 m object for 1.7 s and the segment came out as
      impossible "flight"); root z is projected down so the lowest foot is
      back on the ground, contacts relabeled. No-op without hidden terrain.
-  9. Kinematic clearance projection (clearance.py): poses where the source
-     animal's flexibility exceeds the robot's fold the reference knees
-     through the floor (sit 39% of frames, jump prep 9 cm deep); the root
-     is lifted minimally, feet stay pinned. No-op for reachable poses.
-  10. Speed-aware time warp (timewarp.py, feasibility projection v1):
-     planar root speed above the Go2 tracking ceiling is projected out by
-     local playback slowdown instead of trimming. No-op under the cap.
+  9. Speed-aware time warp (timewarp.py, feasibility projection v1): planar
+     root speed above the Go2 tracking ceiling is projected out by local
+     playback slowdown instead of trimming. No-op for clips under the cap.
 
 Order matters: smooth first (a filter would smear the pins), then align,
 then pin, then IK; relabel needs realized feet, so it triggers one more
 pin + IK pass; despike runs on the joint trajectory the tracker sees; the
-re-ground, clearance and warp go last, on the final §7 dict — re-ground
-before clearance (a lowered root can expose knee penetration), warp last
-because it resamples the time grid.
+re-ground and warp go last, on the final §7 dict — re-ground before warp
+so the warp's speed envelope sees the corrected support.
+
+(A 10th stage — kinematic clearance projection for morphology-gap poses,
+knees below the floor in deep crouches — was built and reverted 2026-07-23
+after stage12: it fixed the sit posture but regressed canter 66→43% and
+did not improve the jump. Design, measurements and the pose-gate idea are
+documented in RESULTS.md "Stage12" sections for a future revisit.)
 """
 
 import numpy as np
@@ -264,17 +265,14 @@ def postprocess(motion, foot_targets_base):
     out["dof_pos"] = despiked
     out["foot_contacts"] = contacts
 
-    # at call site: these modules import this module's helpers
-    from retarget import clearance, reground, timewarp
+    # at call site: both modules import this module's helpers
+    from retarget import reground, timewarp
 
     out, ground = reground.reground(out)
-    out, clear = clearance.project_clearance(out)
     out, warp = timewarp.timewarp(out)
     report = {
         "reground_segments": ground["segments"],
         "reground_max_offset": ground["max_offset"],
-        "clearance_frames_below": clear["frames_below"],
-        "clearance_max_lift": clear["max_lift"],
         "warp_min_rate": warp["min_rate"],
         "warp_slowed_fraction": warp["slowed_fraction"],
         "warp_duration": (warp["duration_before"], warp["duration_after"]),
