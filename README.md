@@ -31,6 +31,38 @@ uv sync
 The Menagerie Go2 model is vendored in `assets/unitree_go2/`
 (BSD-3, see its `LICENSE`; pinned commit in `MENAGERIE_COMMIT.txt`).
 
+### Bulk storage on the SSD
+
+Code stays in this working tree; venvs, model weights, data, logs and caches
+live on the SSD under `$A2G2_SSD`. `~/.bashrc` exports:
+
+```bash
+export A2G2_SSD=/media/SHARED_DATA/postcapitalistrobots/a2g2
+export UV_CACHE_DIR="$A2G2_SSD/caches/uv"
+export HF_HOME="$A2G2_SSD/models/hf"      # HuggingFace + DeepLabCut weights
+export TORCH_HOME="$A2G2_SSD/models/torch"
+export DLC_MODELS="$A2G2_SSD/models/dlc"
+```
+
+`data/` is a symlink into `$A2G2_SSD/data/animal2go2`.
+
+### The v2k perception environment
+
+The video→keypoints stack (`v2k/`) needs torch + DeepLabCut, which conflict
+with this project's mujoco env, so it gets its own venv on the SSD:
+
+```bash
+uv venv --python 3.11 "$A2G2_SSD/venvs/env_v2k"
+uv pip install --python "$A2G2_SSD/venvs/env_v2k/bin/python" \
+  --index-url https://download.pytorch.org/whl/cu124 torch torchvision
+uv pip install --python "$A2G2_SSD/venvs/env_v2k/bin/python" \
+  "transformers>=4.51" "numpy<2.3" scipy opencv-python-headless \
+  "imageio[ffmpeg]" matplotlib tqdm pytest safetensors "deeplabcut>=3.0"
+```
+
+Anything that runs a model uses that interpreter; the pure-numpy parts
+(`v2k.seam`, `v2k.eval2d`, the tests) run under the project's own `uv run`.
+
 Download the dog mocap dataset (AI4Animation, SIGGRAPH 2018 —
 **CC BY-NC 4.0, not redistributed here**):
 

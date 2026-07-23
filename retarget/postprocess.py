@@ -27,14 +27,25 @@ source-side contacts) and produces clean joint trajectories:
      branch flips can jump a joint in a single frame (same clip: 1.33 rad
      in 20 ms = 66 rad/s); target smoothing (step 2) runs *before* IK, so
      nothing else catches them.
-  8. Speed-aware time warp (timewarp.py, feasibility projection v1): planar
-     root speed above the Go2 tracking ceiling is projected out by local
-     playback slowdown instead of trimming. No-op for clips under the cap.
+  8. Support-aware re-grounding (reground.py): sustained all-feet-elevated
+     segments are hidden terrain flattened away by the retarget (jump clip:
+     the dog stood on a ~0.1 m object for 1.7 s and the segment came out as
+     impossible "flight"); root z is projected down so the lowest foot is
+     back on the ground, contacts relabeled. No-op without hidden terrain.
+  9. Kinematic clearance projection (clearance.py): poses where the source
+     animal's flexibility exceeds the robot's fold the reference knees
+     through the floor (sit 39% of frames, jump prep 9 cm deep); the root
+     is lifted minimally, feet stay pinned. No-op for reachable poses.
+  10. Speed-aware time warp (timewarp.py, feasibility projection v1):
+     planar root speed above the Go2 tracking ceiling is projected out by
+     local playback slowdown instead of trimming. No-op under the cap.
 
 Order matters: smooth first (a filter would smear the pins), then align,
 then pin, then IK; relabel needs realized feet, so it triggers one more
 pin + IK pass; despike runs on the joint trajectory the tracker sees; the
-warp goes last because it resamples every channel onto a new time grid.
+re-ground, clearance and warp go last, on the final §7 dict — re-ground
+before clearance (a lowered root can expose knee penetration), warp last
+because it resamples the time grid.
 """
 
 import numpy as np
@@ -253,10 +264,17 @@ def postprocess(motion, foot_targets_base):
     out["dof_pos"] = despiked
     out["foot_contacts"] = contacts
 
-    from retarget import timewarp  # at call site: timewarp imports our helpers
+    # at call site: these modules import this module's helpers
+    from retarget import clearance, reground, timewarp
 
+    out, ground = reground.reground(out)
+    out, clear = clearance.project_clearance(out)
     out, warp = timewarp.timewarp(out)
     report = {
+        "reground_segments": ground["segments"],
+        "reground_max_offset": ground["max_offset"],
+        "clearance_frames_below": clear["frames_below"],
+        "clearance_max_lift": clear["max_lift"],
         "warp_min_rate": warp["min_rate"],
         "warp_slowed_fraction": warp["slowed_fraction"],
         "warp_duration": (warp["duration_before"], warp["duration_after"]),

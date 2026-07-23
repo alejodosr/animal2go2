@@ -27,6 +27,7 @@ One row per run; one change per run (brief §4). Eval numbers from `eval.py`
 | `2026-07-19_stage7_multiclip_all` (run dir dated 2026-07-18) | + canter clip (3-clip RSI, 4000 iters per user) | 4000 | — | — | walk 0.0306 / trot **0.0892** / canter 0.0900 | walk 95.8% / trot **99.5%** / **canter 47.9%** | ✓✓✗ walk+trot HOLD (trot tracking improved 0.109→0.089 with more data); canter joint err under the bar but survival fails — deaths cluster at phase 0.1–0.2 (the 4.1 m/s, 100%-flight gallop burst, ref dof_vel 66 rad/s = 2.2× actuator limit — infeasible) and 0.8–1.0 (sustained 2–2.5 m/s return canter). Per the brief: acceptable failure, article content. 3 per-clip videos in `videos/play/`. **2026-07-20 audit revised this diagnosis — see "Canter feasibility audit" below** |
 | `2026-07-22_11-41-22_stage9_canter_timewarp` | canter **speed-aware time warp only** (`retarget/timewarp.py`, feasibility projection v1): planar root speed capped at 3.2 m/s by local playback slowdown — burst plays at ~0.75×, 73% of the clip bit-identical, 300→319 frames (5.98→6.36 s), smoothed peak 4.32→3.29 m/s, dof_vel peak 40→38.6 rad/s. Return canter (2–2.5 m/s) untouched by design. stage8 pkl → `motions_quarantine/D1_010_KAN01_004.stage8.pkl`, feet caches regenerated | 4000 | 112.5 | 199 | walk 0.0303 / trot 0.0823 / canter 0.0931 | walk 95.5% / trot 98.8% / **canter 61.2%** | ✓✓✗ walk/trot hold; **canter +5.8 pts from the warp** (55.4→61.2). Deaths 73: burst region (warped phase 0.1–0.4) still 43 — root_pos exits, i.e. the robot *survives* the slowed burst but can't hold xy tracking through it (front-support defect: front feet held high, 13/20% contact); return canter 21. From-zero: exit still deterministic in the burst but ~2× deeper (step 42 vs stage8's 22); trot from-zero 50%→98.9% (was knife-edge). Verdict: speed was real but secondary — **front-support repair is the next data lever** |
 | `2026-07-22_14-25-32_stage10_5clip_jumpsit` | +2 clips: jump `D1_ex04_KAN02_003` (8.3 s) + sit/foot-up `D1_ex03_KAN02_013` (76.3 s), both sanitized (relabel+despike; jump contacts 0.25→0.42, dof_vel 84→40; originals in `motions_quarantine/*.orig.pkl`; timewarp no-op — planar 2.1/1.1 m/s). Infra batch: timewarp = postprocess step 8; **MotionLib `equal_clip_steps`** (clip ∼ 1/duration → equal env-step share; else sit eats ~93%); `episode_length_s` 10→80; feet caches ×5; 6000 iters | 6000 | 112.6 | 199 | walk 0.0344 / trot 0.0939 / canter 0.0677 / jump 0.0563 / sit 0.0602* | walk 98.9% / trot 97.9% / **canter 69.3%** / **jump 99.3%** / sit 56.2%* | ✓✓✓✓~ **everything improved**: canter +8.1 pts over stage9 (and tracking 0.093→0.068 best-ever), jump passes both bars outright. From-zero: walk 0→**92.5%**, trot **100%**, jump 49.6%, **sit 100%** (512/512 track all 76 s: sit-down→hold→foot-up→stand-up), canter 0% but exit deepened step 42→~198 (through the burst, now dies in the return section). *sit numbers from dedicated `eval_results_sit_only.md` — the shared eval's 512-episode cap starves long clips (4 eps only, all cold-spawn deaths); its 56.2% phase-averaged deficit = RSI cold-spawns INTO the deep sit (48–58° ref tilt, z 0.08 m; root_ori + 9 base_contact at phase 0.5–0.9), not the behavior. Residual levers: canter front-support repair; jump from-zero knife-edge; spawn-into-sit fragility |
+| `2026-07-22_19-51-38_stage11_jump_reground` | jump clip **re-ground only** (`retarget/reground.py`, new postprocess step 8: support-aware re-grounding — the 1.74 s "hover" was the dog standing on a hidden ~0.16 m object; root z projected down, contacts relabeled 0.42→0.46, real 240 ms leap untouched; stage10 pkl → `motions_quarantine/D1_ex04_KAN02_003.stage10.pkl`; verified no-op on the other 4 clips; 4 unit tests) | 6000 | 132.7 | 234 | (per-ckpt — see below) | (per-ckpt — see below) | ✓✗ **the jump fix worked** (from-zero 49.6→90.1% at m5999, 94.8% at m5600 — robust across checkpoints) **but training exhibits late multi-behavior churn**: different checkpoints own different behaviors and no single one passes all 5 (map in "Stage11 checkpoint churn" below). Best compromise m5600: walk 100/95.3, trot 82.5/30.6, canter **73.7**/0, jump 98.4/94.8, sit 54.5/0 (std/from-zero). Final m5999: sit 68.8/**91.2** + jump 96.7/90.1 but trot **10/1** (root_ori, end tilt 39°). Reward kept climbing through the churn (132.7 final) — total reward masks per-clip collapse |
 | `2026-07-20_14-50-16_stage8_canter_datafix` | canter **data fix only** (no env/reward change): despiked `dof_pos` (BVLS velocity clamp at 40 rad/s — trot's raw peak; 3 joints, ≤5 frames each, max 0.29 rad) + contacts relabeled from retargeted foot height (world z < 0.030 m + 1-frame morph cleanup; fraction 0.13→0.30), feet cache regenerated. Original pkl: `motions_quarantine/D1_010_KAN01_004.orig.pkl` | 4000 | 109.5 | 189 | walk 0.0291 / trot 0.0870 / canter 0.0993 | walk **96.8%** / trot 98.9% / **canter 55.4%** | ✓✓✗ walk best-ever tracking+survival, trot holds; **canter +7.5 pts survival from the data fix alone** (joint err 0.090→0.099, still under bar). Deaths now cleanly bimodal: 34/79 at phase 0.1–0.2 (the 4.5 m/s hind-leg-only gallop burst — the audit's genuine-physics residue) and 31/79 at 0.8–1.0 (fast return canter). Verdict: ~⅓ of the stage7 deficit was the data defect; the rest is the infeasible burst → trim (frames ~90–300) remains the honest lever if canter must pass |
 
 ## Peng 2020 comparison (2026-07-18)
@@ -254,6 +255,36 @@ NOT in the batch: γ, preview horizon, termination redesign, velocity_limit.
   bindings otherwise win and leave meshes dark). Ghost = blue, policy
   robot = white. In doubling-back clips the white robot may pass
   *through* the blue ghost on video — harmless now, by construction.
+
+## Stage11 checkpoint churn (2026-07-23)
+
+Trot's 97.9→10% collapse at the final checkpoint triggered a bisect, which
+found not one collapse but **oscillation**: per-checkpoint standard-eval
+survival (%), plus from-zero where measured:
+
+| ckpt | walk | trot | canter | jump | sit* |
+|---|---|---|---|---|---|
+| m3000 | — | 62.5 | — | — | — |
+| m4800 | 82.2 | **95.0** (fz 73.7) | 66.7 | 96.5 | fz 0 |
+| m5200 | 86.6 | 73.9 | 66.8 | 97.7 | — |
+| m5600 | **100** (fz 95.3) | 82.5 (fz 30.6) | **73.7** | **98.4** (fz 94.8) | 54.5 (fz 0) |
+| m5999 | 100 (fz 50) | 10.0 (fz 1) | 66.2 | 96.7 (fz 90.1) | **68.8** (fz **91.2**) |
+
+(*sit numbers from dedicated sit-only evals; shared eval starves it.)
+
+Facts: behaviors trade places between checkpoints 200–400 iters apart while
+total training reward rises monotonically; the failure signatures differ
+per checkpoint era (trot dies by root_ori/tilt at m5999; walk died by
+root_ori at m4800-from-zero; sit-from-zero dies by xy drift at m5600 vs
+surviving 91% at m5999). Hypotheses (not verified): gradient conflict
+between sit's required ~50° reference tilt and the gait clips' tilt
+regulation, amplified once the re-grounded jump became learnable (richer
+reward → larger jump/sit gradient share late in training); no clip ID in
+the obs contract means all disambiguation flows through the preview.
+Candidate mitigations for a stage12: late-training LR/plasticity decay,
+periodic multi-clip eval + best-checkpoint selection as infrastructure,
+checkpoint weight averaging (same-run soup), or accepting per-behavior
+checkpoint selection at deployment (breaks the one-policy milestone goal).
 
 ## Stage10 video review + jump forensics (2026-07-22)
 
